@@ -1,15 +1,20 @@
-import os
+import asyncio
 import logging
-from aiogram import Bot, Dispatcher, types
+import os
+
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "okvej_manager")
-SITE_URL = os.getenv("SITE_URL", "https://okvej.com.ua")
-CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/simeinatsukerniaa")
 
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
@@ -18,49 +23,130 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
-def main_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍬 Каталог", url=SITE_URL)],
-        [InlineKeyboardButton(text="🔍 Пошук товару", callback_data="search")],
-        [InlineKeyboardButton(text="🎁 Подарункові набори", url=f"{SITE_URL}/ua/podarochnye-nabory/")],
-        [InlineKeyboardButton(text="🔥 Акції", url=f"{SITE_URL}/ua/sale/")],
-        [InlineKeyboardButton(text="💬 Менеджер", url=f"https://t.me/{MANAGER_USERNAME}")],
-        [InlineKeyboardButton(text="📢 Канал OKVEJ", url=CHANNEL_URL)],
-    ])
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔥 Акції")],
+        [KeyboardButton(text="🔍 Пошук товару"), KeyboardButton(text="🛒 Кошик")],
+        [KeyboardButton(text="🌐 Сайт"), KeyboardButton(text="💬 Менеджер")],
+    ],
+    resize_keyboard=True,
+)
 
 
 @dp.message(CommandStart())
-async def start(message: types.Message):
+async def start(message: Message):
     text = (
         "🍬 <b>Вітаємо в OKVEJ!</b>\n\n"
-        "Тут можна швидко знайти солодощі, подарункові набори та перейти до оформлення замовлення.\n\n"
-        "🍫 Цукерки, шоколад, печиво\n"
-        "🎁 Подарункові набори\n"
-        "🚚 Доставка по всій Україні\n"
-        "🏠 Курʼєр по Києву\n\n"
-        "Оберіть дію нижче 👇"
+        "Тут ви зможете швидко знайти солодощі, переглянути каталог "
+        "та оформити замовлення.\n\n"
+        "Оберіть потрібний розділ 👇"
     )
-    await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+
+    await message.answer(text, reply_markup=main_menu, parse_mode="HTML")
 
 
-@dp.callback_query(lambda c: c.data == "search")
-async def search_info(callback: types.CallbackQuery):
-    await callback.message.answer(
-        "🔍 Пошук товарів скоро буде працювати прямо в боті.\n\n"
-        "Поки що напишіть менеджеру, що шукаєте, або відкрийте каталог на сайті.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🌐 Відкрити каталог", url=SITE_URL)],
-            [InlineKeyboardButton(text="💬 Написати менеджеру", url=f"https://t.me/{MANAGER_USERNAME}")],
-        ])
+@dp.message(F.text == "🍬 Каталог")
+async def catalog(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🍫 Перейти в каталог",
+                    url="https://okvej.com.ua/",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎁 Подарункові набори",
+                    url="https://okvej.com.ua/",
+                )
+            ],
+        ]
     )
-    await callback.answer()
+
+    await message.answer(
+        "🍬 <b>Каталог OKVEJ</b>\n\n"
+        "Поки каталог відкривається на сайті.\n"
+        "Наступним етапом ми підключимо товари прямо в Telegram через API Хорошоп.",
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+
+@dp.message(F.text == "🔥 Акції")
+async def sales(message: Message):
+    await message.answer(
+        "🔥 <b>Акції OKVEJ</b>\n\n"
+        "Скоро тут будуть спеціальні пропозиції, знижки та новинки.\n\n"
+        "А поки можна переглянути товари на сайті:\n"
+        "https://okvej.com.ua",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(F.text == "🔍 Пошук товару")
+async def search(message: Message):
+    await message.answer(
+        "🔍 <b>Пошук товару</b>\n\n"
+        "Напишіть назву товару або категорію, наприклад:\n"
+        "• марципан\n"
+        "• печиво\n"
+        "• шоколад\n"
+        "• цукерки без цукру\n\n"
+        "Поки пошук працює як запит до менеджера. "
+        "Пізніше підключимо автоматичний пошук по каталогу OKVEJ.",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(F.text == "🛒 Кошик")
+async def cart(message: Message):
+    await message.answer(
+        "🛒 <b>Кошик</b>\n\n"
+        "Кошик поки порожній.\n\n"
+        "Після підключення каталогу тут можна буде переглядати обрані товари "
+        "та оформлювати замовлення прямо в Telegram.",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(F.text == "🌐 Сайт")
+async def site(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🌐 Відкрити OKVEJ",
+                    url="https://okvej.com.ua/",
+                )
+            ]
+        ]
+    )
+
+    await message.answer(
+        "🌐 Наш сайт:\n\nhttps://okvej.com.ua",
+        reply_markup=keyboard,
+    )
+
+
+@dp.message(F.text == "💬 Менеджер")
+async def manager(message: Message):
+    await message.answer(
+        "💬 <b>Зв'язатися з менеджером</b>\n\n"
+        "Напишіть сюди:\n"
+        "@okvej_manager\n\n"
+        "Або залиште повідомлення в цьому боті — менеджер зможе відповісти після підключення заявок.",
+        parse_mode="HTML",
+    )
 
 
 @dp.message()
-async def any_message(message: types.Message):
+async def unknown_message(message: Message):
     await message.answer(
-        "Я бот магазину OKVEJ 🍬\n\n"
-        "Натисніть /start, щоб відкрити меню."
+        "Я вас зрозумів 👍\n\n"
+        "Поки бот працює в тестовому режимі.\n"
+        "Оберіть дію з меню нижче 👇",
+        reply_markup=main_menu,
     )
 
 
@@ -69,5 +155,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
