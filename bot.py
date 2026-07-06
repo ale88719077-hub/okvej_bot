@@ -28,7 +28,7 @@ main_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔥 Акції")],
         [KeyboardButton(text="🔍 Пошук товару"), KeyboardButton(text="🛒 Кошик")],
         [KeyboardButton(text="🌐 Сайт"), KeyboardButton(text="💬 Менеджер")],
-    ],
+        [KeyboardButton(text="📢 Канал OKVEJ")]
     resize_keyboard=True,
 )
 
@@ -62,6 +62,18 @@ async def catalog(message: Message):
                 )
             ],
         ]
+    )
+    @dp.message(F.text == "📢 Канал OKVEJ")
+async def channel(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📢 Перейти в канал OKVEJ", url="https://t.me/okvej")]
+        ]
+    )
+
+    await message.answer(
+        "📢 Наш Telegram-канал OKVEJ:\n\nhttps://t.me/okvej",
+        reply_markup=keyboard,
     )
 
     await message.answer(
