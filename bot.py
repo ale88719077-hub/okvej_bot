@@ -22,48 +22,30 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔥 Акції")],
         [KeyboardButton(text="🔍 Пошук товару"), KeyboardButton(text="🛒 Кошик")],
         [KeyboardButton(text="🌐 Сайт"), KeyboardButton(text="💬 Менеджер")],
-        [KeyboardButton(text="📢 Канал OKVEJ")]
+        [KeyboardButton(text="📢 Канал OKVEJ")],
+    ],
     resize_keyboard=True,
 )
 
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    text = (
+    await message.answer(
         "🍬 <b>Вітаємо в OKVEJ!</b>\n\n"
         "Тут ви зможете швидко знайти солодощі, переглянути каталог "
         "та оформити замовлення.\n\n"
-        "Оберіть потрібний розділ 👇"
+        "Оберіть потрібний розділ 👇",
+        reply_markup=main_menu,
+        parse_mode="HTML",
     )
 
-    await message.answer(text, reply_markup=main_menu, parse_mode="HTML")
 
-
-@dp.message(F.text == "🍬 Каталог")
-async def catalog(message: Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🍫 Перейти в каталог",
-                    url="https://okvej.com.ua/",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎁 Подарункові набори",
-                    url="https://okvej.com.ua/",
-                )
-            ],
-        ]
-    )
-    @dp.message(F.text == "📢 Канал OKVEJ")
+@dp.message(F.text == "📢 Канал OKVEJ")
 async def channel(message: Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -74,6 +56,16 @@ async def channel(message: Message):
     await message.answer(
         "📢 Наш Telegram-канал OKVEJ:\n\nhttps://t.me/okvej",
         reply_markup=keyboard,
+    )
+
+
+@dp.message(F.text == "🍬 Каталог")
+async def catalog(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🍫 Перейти в каталог", url="https://okvej.com.ua/")],
+            [InlineKeyboardButton(text="🎁 Подарункові набори", url="https://okvej.com.ua/")],
+        ]
     )
 
     await message.answer(
@@ -126,12 +118,7 @@ async def cart(message: Message):
 async def site(message: Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🌐 Відкрити OKVEJ",
-                    url="https://okvej.com.ua/",
-                )
-            ]
+            [InlineKeyboardButton(text="🌐 Відкрити OKVEJ", url="https://okvej.com.ua/")]
         ]
     )
 
@@ -146,8 +133,7 @@ async def manager(message: Message):
     await message.answer(
         "💬 <b>Зв'язатися з менеджером</b>\n\n"
         "Напишіть сюди:\n"
-        "@okvej_manager\n\n"
-        "Або залиште повідомлення в цьому боті — менеджер зможе відповісти після підключення заявок.",
+        "@okvej_manager",
         parse_mode="HTML",
     )
 
@@ -156,7 +142,6 @@ async def manager(message: Message):
 async def unknown_message(message: Message):
     await message.answer(
         "Я вас зрозумів 👍\n\n"
-        "Поки бот працює в тестовому режимі.\n"
         "Оберіть дію з меню нижче 👇",
         reply_markup=main_menu,
     )
