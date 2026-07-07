@@ -116,19 +116,18 @@ async def process_search(message: Message, state: FSMContext):
 
     try:
         products = await shop.get_products(limit=300)
-
         results = []
 
         for product in products:
             title_data = product.get("title", "")
 
-if isinstance(title_data, dict):
-    title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
-else:
-    title = title_data
+            if isinstance(title_data, dict):
+                title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
+            else:
+                title = title_data
 
-if query in title.lower():
-    results.append(product)
+            if query in title.lower():
+                results.append(product)
 
         if not results:
             await message.answer("😔 Нічого не знайдено.")
@@ -136,18 +135,18 @@ if query in title.lower():
             text = "🍬 Знайдені товари:\n\n"
 
             for p in results[:10]:
-            title_data = p.get("title", "")
+                title_data = p.get("title", "")
 
-if isinstance(title_data, dict):
-    title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
-else:
-    title = title_data
+                if isinstance(title_data, dict):
+                    title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
+                else:
+                    title = title_data
 
-text += (
-    f"• <b>{title}</b>\n"
-    f"💰 {p.get('price', '-')} грн\n"
-    f"🔗 {p.get('link', '')}\n\n"
-)
+                text += (
+                    f"• <b>{title}</b>\n"
+                    f"💰 {p.get('price', '-')} грн\n"
+                    f"🔗 {p.get('link', '')}\n\n"
+                )
 
             await message.answer(text, parse_mode="HTML")
 
