@@ -24,6 +24,9 @@ class HoroshopAPI:
     async def get_token(self):
         if self.token and time.time() < self.token_until:
             return self.token
+        print("DOMAIN:", self.base_url)
+        print("LOGIN:", repr(self.login))
+        print("PASSWORD:", repr(self.password))
 
         data = await self._post("auth", {
             "login": self.login,
