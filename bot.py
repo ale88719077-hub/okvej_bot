@@ -118,11 +118,12 @@ async def process_search(message: Message, state: FSMContext):
         products = await shop.get_products(limit=300)
         results = []
 
-        for product in products:
-            title_data = product.get("title", "")
+       for product in products:
     presence = product.get("presence")
     if presence not in ["В наявності", "available", "in_stock", 1, True]:
         continue
+
+    title_data = product.get("title", "")
         
             if isinstance(title_data, dict):
                 title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
