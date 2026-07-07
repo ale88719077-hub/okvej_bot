@@ -40,7 +40,7 @@ class HoroshopAPI:
         self.token_until = time.time() + 540
         return self.token
 
-    async def get_products(self, limit=5, offset=0):
+async def get_products(self, limit=5, offset=0):
     token = await self.get_token()
 
     data = await self._post("catalog/export", {
@@ -65,6 +65,14 @@ class HoroshopAPI:
 
     products = data.get("response", {}).get("products", [])
 
+    print("========== FIRST PRODUCT ==========")
+    if products:
+        print(products[0])
+    else:
+        print("NO PRODUCTS")
+    print("===================================")
+
+    return products
     print("========== FIRST PRODUCT ==========")
     if products:
         print(products[0])
