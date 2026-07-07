@@ -23,7 +23,7 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 shop = HoroshopAPI(
-    domain=os.getenv("HOROSHOP_DOMAIN"),
+    domain=os.getenv("HOROSHOP_DOMAIN", "okvej.com.ua"),
     login=os.getenv("HOROSHOP_LOGIN"),
     password=os.getenv("HOROSHOP_PASSWORD"),
 )
