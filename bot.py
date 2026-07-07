@@ -22,6 +22,9 @@ if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
 bot = Bot(token=TOKEN)
+print("ENV LOGIN =", os.getenv("HOROSHOP_LOGIN"))
+print("ENV PASSWORD =", os.getenv("HOROSHOP_PASSWORD"))
+print("ENV DOMAIN =", os.getenv("HOROSHOP_DOMAIN"))
 shop = HoroshopAPI(
     domain=os.getenv("HOROSHOP_DOMAIN", "okvej.com.ua"),
     login=os.getenv("HOROSHOP_LOGIN"),
