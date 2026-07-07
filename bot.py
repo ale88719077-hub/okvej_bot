@@ -3,9 +3,9 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
@@ -13,23 +13,29 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+
 from horoshop_api import HoroshopAPI
+
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
 bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
 shop = HoroshopAPI(
     domain=os.getenv("HOROSHOP_DOMAIN", "okvej.com.ua"),
     login=os.getenv("HOROSHOP_LOGIN"),
     password=os.getenv("HOROSHOP_PASSWORD"),
 )
-dp = Dispatcher()
+
+
 class SearchState(StatesGroup):
     waiting_query = State()
+
+
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔥 Акції")],
@@ -39,6 +45,62 @@ main_menu = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
+
+
+def localized(value):
+    if isinstance(value, dict):
+        return value.get("ua") or value.get("uk") or value.get("ru") or next(iter(value.values()), "")
+    return value or ""
+
+
+def is_in_stock(product: dict) -> bool:
+    presence = product.get("presence")
+
+    if isinstance(presence, dict):
+        presence = localized(presence)
+
+    if presence is True or presence == 1:
+        return True
+
+    if presence is False or presence == 0 or presence is None:
+        return False
+
+    value = str(presence).strip().lower()
+
+    positive_values = [
+        "1",
+        "true",
+        "yes",
+        "available",
+        "in_stock",
+        "в наявності",
+        "є в наявності",
+        "есть в наличии",
+        "наявний",
+    ]
+
+    negative_values = [
+        "",
+        "0",
+        "false",
+        "no",
+        "none",
+        "null",
+        "not_available",
+        "out_of_stock",
+        "unavailable",
+        "немає",
+        "немає в наявності",
+        "нет",
+        "нет в наличии",
+        "відсутній",
+        "отсутствует",
+    ]
+
+    if value in negative_values:
+        return False
+
+    return any(word in value for word in positive_values)
 
 
 @dp.message(CommandStart())
@@ -60,7 +122,6 @@ async def channel(message: Message):
             [InlineKeyboardButton(text="📢 Перейти в канал OKVEJ", url="https://t.me/okvej")]
         ]
     )
-
     await message.answer(
         "📢 Наш Telegram-канал OKVEJ:\n\nhttps://t.me/okvej",
         reply_markup=keyboard,
@@ -75,7 +136,6 @@ async def catalog(message: Message):
             [InlineKeyboardButton(text="🎁 Подарункові набори", url="https://okvej.com.ua/")],
         ]
     )
-
     await message.answer(
         "🍬 <b>Каталог OKVEJ</b>\n\n"
         "Поки каталог відкривається на сайті.\n"
@@ -109,48 +169,21 @@ async def search(message: Message, state: FSMContext):
 
 @dp.message(SearchState.waiting_query)
 async def process_search(message: Message, state: FSMContext):
-    query = message.text.lower().strip()
+    query = (message.text or "").strip().lower()
 
-    def extract_text(value):
-        if isinstance(value, dict):
-            return value.get("ua") or value.get("ru") or next(iter(value.values()), "")
-        return value or ""
-
-    def is_in_stock(product: dict) -> bool:
-        presence = product.get("presence")
-
-        if isinstance(presence, dict):
-            presence = extract_text(presence)
-
-        if isinstance(presence, bool):
-            return presence
-
-        if isinstance(presence, (int, float)):
-            return presence > 0
-
-        if isinstance(presence, str):
-            value = presence.strip().lower()
-            if value in ("в наявності", "є в наявності", "available", "in_stock", "instock", "yes", "true", "1"):
-                return True
-            if value in ("немає в наявності", "немає", "нет в наличии", "out_of_stock", "not_available", "no", "false", "0"):
-                return False
-
-        quantity = product.get("quantity") or product.get("stock") or product.get("amount")
-        if isinstance(quantity, (int, float)):
-            return quantity > 0
-
-        return False
+    if not query:
+        await message.answer("Введіть назву товару текстом 👇")
+        return
 
     try:
-        products = await shop.get_products(limit=300)
+        products = await shop.get_products(limit=500)
         results = []
 
         for product in products:
             if not is_in_stock(product):
                 continue
 
-            title = extract_text(product.get("title", ""))
-
+            title = localized(product.get("title"))
             if query in title.lower():
                 results.append(product)
 
@@ -160,13 +193,14 @@ async def process_search(message: Message, state: FSMContext):
             text = "🍬 Знайдені товари в наявності:\n\n"
 
             for p in results[:10]:
-                title = extract_text(p.get("title", ""))
+                title = localized(p.get("title"))
+                price = localized(p.get("price")) or "-"
+                link = localized(p.get("link"))
 
-                text += (
-                    f"• <b>{title}</b>\n"
-                    f"💰 {p.get('price', '-')} грн\n"
-                    f"🔗 {p.get('link', '')}\n\n"
-                )
+                text += f"• <b>{title}</b>\n💰 {price} грн"
+                if link:
+                    text += f"\n🔗 {link}"
+                text += "\n\n"
 
             await message.answer(text, parse_mode="HTML")
 
@@ -194,7 +228,6 @@ async def site(message: Message):
             [InlineKeyboardButton(text="🌐 Відкрити OKVEJ", url="https://okvej.com.ua/")]
         ]
     )
-
     await message.answer(
         "🌐 Наш сайт:\n\nhttps://okvej.com.ua",
         reply_markup=keyboard,
