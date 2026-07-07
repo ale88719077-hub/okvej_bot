@@ -120,9 +120,15 @@ async def process_search(message: Message, state: FSMContext):
         results = []
 
         for product in products:
-            title = product.get("title", "")
-            if query in title.lower():
-                results.append(product)
+            title_data = product.get("title", "")
+
+if isinstance(title_data, dict):
+    title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
+else:
+    title = title_data
+
+if query in title.lower():
+    results.append(product)
 
         if not results:
             await message.answer("😔 Нічого не знайдено.")
@@ -130,11 +136,18 @@ async def process_search(message: Message, state: FSMContext):
             text = "🍬 Знайдені товари:\n\n"
 
             for p in results[:10]:
-                text += (
-                    f"• <b>{p['title']}</b>\n"
-                    f"💰 {p.get('price', '-') } грн\n"
-                    f"🔗 {p.get('link', '')}\n\n"
-                )
+            title_data = p.get("title", "")
+
+if isinstance(title_data, dict):
+    title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
+else:
+    title = title_data
+
+text += (
+    f"• <b>{title}</b>\n"
+    f"💰 {p.get('price', '-')} грн\n"
+    f"🔗 {p.get('link', '')}\n\n"
+)
 
             await message.answer(text, parse_mode="HTML")
 
