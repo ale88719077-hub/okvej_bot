@@ -11,7 +11,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-
+from horoshop_api import HoroshopAPI
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -20,6 +20,11 @@ if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
 bot = Bot(token=TOKEN)
+shop = HoroshopAPI(
+    domain=os.getenv("HOROSHOP_DOMAIN"),
+    login=os.getenv("HOROSHOP_LOGIN"),
+    password=os.getenv("HOROSHOP_PASSWORD"),
+)
 dp = Dispatcher()
 
 main_menu = ReplyKeyboardMarkup(
