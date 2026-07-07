@@ -41,26 +41,35 @@ class HoroshopAPI:
         return self.token
 
     async def get_products(self, limit=5, offset=0):
-        token = await self.get_token()
+    token = await self.get_token()
 
-        data = await self._post("catalog/export", {
-            "token": token,
-            "offset": offset,
-            "limit": limit,
-            "expr": {
-                "display_in_showcase": 1
-            },
-            "includedParams": [
-                "title",
-                "price",
-                "presence",
-                "link",
-                "images",
-                "article"
-            ]
-        })
+    data = await self._post("catalog/export", {
+        "token": token,
+        "offset": offset,
+        "limit": limit,
+        "expr": {
+            "display_in_showcase": 1
+        },
+        "includedParams": [
+            "title",
+            "price",
+            "presence",
+            "link",
+            "images",
+            "article"
+        ]
+    })
 
-        if data.get("status") != "OK":
-            raise RuntimeError(f"Horoshop catalog error: {data}")
-        print(data.get("products", [])[0])
-        return data.get("response", {}).get("products", [])
+    if data.get("status") != "OK":
+        raise RuntimeError(f"Horoshop catalog error: {data}")
+
+    products = data.get("response", {}).get("products", [])
+
+    print("========== FIRST PRODUCT ==========")
+    if products:
+        print(products[0])
+    else:
+        print("NO PRODUCTS")
+    print("===================================")
+
+    return products
