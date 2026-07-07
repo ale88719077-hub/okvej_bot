@@ -22,9 +22,6 @@ if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
 bot = Bot(token=TOKEN)
-print("ENV LOGIN =", os.getenv("HOROSHOP_LOGIN"))
-print("ENV PASSWORD =", os.getenv("HOROSHOP_PASSWORD"))
-print("ENV DOMAIN =", os.getenv("HOROSHOP_DOMAIN"))
 shop = HoroshopAPI(
     domain=os.getenv("HOROSHOP_DOMAIN", "okvej.com.ua"),
     login=os.getenv("HOROSHOP_LOGIN"),
@@ -112,39 +109,58 @@ async def search(message: Message, state: FSMContext):
 
 @dp.message(SearchState.waiting_query)
 async def process_search(message: Message, state: FSMContext):
-    query = message.text.lower()
+    query = message.text.lower().strip()
+
+    def extract_text(value):
+        if isinstance(value, dict):
+            return value.get("ua") or value.get("ru") or next(iter(value.values()), "")
+        return value or ""
+
+    def is_in_stock(product: dict) -> bool:
+        presence = product.get("presence")
+
+        if isinstance(presence, dict):
+            presence = extract_text(presence)
+
+        if isinstance(presence, bool):
+            return presence
+
+        if isinstance(presence, (int, float)):
+            return presence > 0
+
+        if isinstance(presence, str):
+            value = presence.strip().lower()
+            if value in ("в наявності", "є в наявності", "available", "in_stock", "instock", "yes", "true", "1"):
+                return True
+            if value in ("немає в наявності", "немає", "нет в наличии", "out_of_stock", "not_available", "no", "false", "0"):
+                return False
+
+        quantity = product.get("quantity") or product.get("stock") or product.get("amount")
+        if isinstance(quantity, (int, float)):
+            return quantity > 0
+
+        return False
 
     try:
         products = await shop.get_products(limit=300)
         results = []
 
-    for product in products:
-        presence = product.get("presence")
-        if presence not in ["В наявності", "available", "in_stock", 1, True]:
-            continue
+        for product in products:
+            if not is_in_stock(product):
+                continue
 
-        title_data = product.get("title", "")
-        
-            if isinstance(title_data, dict):
-                title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
-            else:
-                title = title_data
+            title = extract_text(product.get("title", ""))
 
             if query in title.lower():
                 results.append(product)
 
         if not results:
-            await message.answer("😔 Нічого не знайдено.")
+            await message.answer("😔 Нічого не знайдено в наявності.")
         else:
-            text = "🍬 Знайдені товари:\n\n"
+            text = "🍬 Знайдені товари в наявності:\n\n"
 
             for p in results[:10]:
-                title_data = p.get("title", "")
-
-                if isinstance(title_data, dict):
-                    title = title_data.get("ua") or title_data.get("ru") or next(iter(title_data.values()), "")
-                else:
-                    title = title_data
+                title = extract_text(p.get("title", ""))
 
                 text += (
                     f"• <b>{title}</b>\n"
@@ -158,7 +174,7 @@ async def process_search(message: Message, state: FSMContext):
         await message.answer(f"❌ Помилка: {e}")
 
     await state.clear()
-    
+
 
 @dp.message(F.text == "🛒 Кошик")
 async def cart(message: Message):
