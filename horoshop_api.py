@@ -4,13 +4,16 @@ import aiohttp
 
 
 class HoroshopAPI:
-    def __init__(self):
-        domain = os.getenv("HOROSHOP_DOMAIN", "").replace("https://", "").replace("http://", "").strip("/")
+    def __init__(self, domain, login, password):
+        domain = domain.replace("https://", "").replace("http://", "").strip("/")
+
         self.base_url = f"https://{domain}/api"
-        self.login = os.getenv("HOROSHOP_LOGIN")
-        self.password = os.getenv("HOROSHOP_PASSWORD")
+        self.login = login
+        self.password = password
+
         self.token = None
         self.token_until = 0
+       
 
     async def _post(self, endpoint: str, payload: dict):
         url = f"{self.base_url}/{endpoint.strip('/')}/"
