@@ -3,6 +3,8 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message,
@@ -26,7 +28,8 @@ shop = HoroshopAPI(
     password=os.getenv("HOROSHOP_PASSWORD"),
 )
 dp = Dispatcher()
-
+class SearchState(StatesGroup):
+    waiting_query = State()
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔥 Акції")],
@@ -94,19 +97,49 @@ async def sales(message: Message):
 
 
 @dp.message(F.text == "🔍 Пошук товару")
-async def search(message: Message):
+async def search(message: Message, state: FSMContext):
+    await state.set_state(SearchState.waiting_query)
     await message.answer(
-        "🔍 <b>Пошук товару</b>\n\n"
-        "Напишіть назву товару або категорію, наприклад:\n"
+        "🔍 Введіть назву товару, наприклад:\n\n"
         "• марципан\n"
         "• печиво\n"
-        "• шоколад\n"
-        "• цукерки без цукру\n\n"
-        "Поки пошук працює як запит до менеджера. "
-        "Пізніше підключимо автоматичний пошук по каталогу OKVEJ.",
-        parse_mode="HTML",
+        "• шоколад"
     )
 
+
+@dp.message(SearchState.waiting_query)
+async def process_search(message: Message, state: FSMContext):
+    query = message.text.lower()
+
+    try:
+        products = await shop.get_products(limit=300)
+
+        results = []
+
+        for product in products:
+            title = product.get("title", "")
+            if query in title.lower():
+                results.append(product)
+
+        if not results:
+            await message.answer("😔 Нічого не знайдено.")
+        else:
+            text = "🍬 Знайдені товари:\n\n"
+
+            for p in results[:10]:
+                text += (
+                    f"• <b>{p['title']}</b>\n"
+                    f"💰 {p.get('price', '-') } грн\n"
+                    f"🔗 {p.get('link', '')}\n\n"
+                )
+
+            await message.answer(text, parse_mode="HTML")
+
+    except Exception as e:
+        await message.answer(f"❌ Помилка: {e}")
+
+    await state.clear()
+    
 
 @dp.message(F.text == "🛒 Кошик")
 async def cart(message: Message):
