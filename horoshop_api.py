@@ -62,5 +62,5 @@ class HoroshopAPI:
 
         if data.get("status") != "OK":
             raise RuntimeError(f"Horoshop catalog error: {data}")
-
+        print(data.get("products", [])[0])
         return data.get("response", {}).get("products", [])
