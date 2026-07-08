@@ -5,7 +5,11 @@ import aiohttp
 class HoroshopAPI:
     def __init__(self, domain, login, password):
         if not domain:
-            domain = "okvej.com.ua"
+            raise RuntimeError("HOROSHOP_DOMAIN is not set")
+        if not login:
+            raise RuntimeError("HOROSHOP_LOGIN is not set")
+        if not password:
+            raise RuntimeError("HOROSHOP_PASSWORD is not set")
 
         domain = domain.replace("https://", "").replace("http://", "").strip("/")
 
@@ -28,9 +32,6 @@ class HoroshopAPI:
     async def get_token(self):
         if self.token and time.time() < self.token_until:
             return self.token
-
-        if not self.login or not self.password:
-            raise RuntimeError("HOROSHOP_LOGIN or HOROSHOP_PASSWORD is not set")
 
         data = await self._post("auth", {
             "login": self.login,
@@ -60,7 +61,12 @@ class HoroshopAPI:
                 "presence",
                 "link",
                 "images",
-                "article"
+                "article",
+                "quantity",
+                "stock",
+                "available",
+                "count",
+                "balance"
             ]
         })
 
