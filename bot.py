@@ -1,10 +1,10 @@
 import asyncio
 import logging
 import os
-from html import escape
+from urllib.parse import urljoin
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -23,6 +23,11 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@okvej")
+SITE_URL = "https://okvej.com.ua/"
+BOT_URL = "https://t.me/okvej_shop_bot"
+MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd")
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -31,9 +36,6 @@ shop = HoroshopAPI(
     login=os.getenv("HOROSHOP_LOGIN"),
     password=os.getenv("HOROSHOP_PASSWORD"),
 )
-
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@okvej")
-SITE_URL = "https://okvej.com.ua"
 
 
 class SearchState(StatesGroup):
@@ -51,160 +53,194 @@ main_menu = ReplyKeyboardMarkup(
 )
 
 
-def localized(value):
+def catalog_buttons():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🍬 Цукерки вагові", url="https://okvej.com.ua/ua/konfety-vesovye/")],
+            [InlineKeyboardButton(text="🍭 Карамель", url="https://okvej.com.ua/ua/karamel-v-miahkoi-upakovke/")],
+            [InlineKeyboardButton(text="🎁 Подарунки", url="https://okvej.com.ua/ua/nabory-podarochnykh-konfet/")],
+            [InlineKeyboardButton(text="🍪 Печиво", url="https://okvej.com.ua/ua/pechene-y-muchnye-yzdelyia/")],
+            [InlineKeyboardButton(text="☁️ Зефір та мармелад", url="https://okvej.com.ua/ua/zefyr-y-marmelad/")],
+            [InlineKeyboardButton(text="🍫 Шоколад", url="https://okvej.com.ua/ua/shokolad/")],
+            [InlineKeyboardButton(text="💬 Менеджер", url=f"https://t.me/{MANAGER_USERNAME.lstrip('@')}")],
+            [InlineKeyboardButton(text="🌐 Сайт", url=SITE_URL)],
+            [InlineKeyboardButton(text="🤖 Відкрити бота", url=BOT_URL)],
+        ]
+    )
+
+
+def localize(value):
     if isinstance(value, dict):
-        return value.get("ua") or value.get("uk") or value.get("ru") or next(iter(value.values()), "")
+        return (
+            value.get("ua")
+            or value.get("uk")
+            or value.get("ru")
+            or value.get("ru_RU")
+            or value.get("uk_UA")
+            or next(iter(value.values()), "")
+        )
     return value or ""
 
 
-def value_to_text(value) -> str:
-    if isinstance(value, dict):
-        return " ".join(value_to_text(v) for v in value.values())
-    if isinstance(value, list):
-        return " ".join(value_to_text(v) for v in value)
-    return str(value or "")
+def product_link(product: dict) -> str:
+    link = localize(product.get("link") or product.get("url") or "")
+    if not link:
+        return SITE_URL
+    if link.startswith("http"):
+        return link
+    return urljoin(SITE_URL, link.lstrip("/"))
+
+
+def product_price(product: dict) -> str:
+    price = product.get("price") or product.get("price_old") or product.get("cost") or "-"
+    if isinstance(price, dict):
+        price = price.get("value") or price.get("price") or next(iter(price.values()), "-")
+    return str(price)
+
+
+def get_image_url(product: dict) -> str | None:
+    images = product.get("images") or product.get("image") or product.get("photo")
+
+    if isinstance(images, list) and images:
+        first = images[0]
+        if isinstance(first, dict):
+            url = first.get("url") or first.get("src") or first.get("image") or first.get("big")
+        else:
+            url = str(first)
+    elif isinstance(images, dict):
+        url = images.get("url") or images.get("src") or images.get("image") or images.get("big")
+    elif isinstance(images, str):
+        url = images
+    else:
+        url = None
+
+    if not url:
+        return None
+    if url.startswith("http"):
+        return url
+    return urljoin(SITE_URL, url.lstrip("/"))
 
 
 def is_in_stock(product: dict) -> bool:
     candidates = [
         product.get("presence"),
         product.get("available"),
-        product.get("availability"),
+        product.get("in_stock"),
         product.get("stock"),
         product.get("quantity"),
-        product.get("amount"),
-        product.get("residue"),
+        product.get("count"),
+        product.get("balance"),
     ]
 
-    for presence in candidates:
-        if isinstance(presence, dict):
-            presence = localized(presence) or value_to_text(presence)
+    positive = {
+        "1", "true", "yes", "available", "in_stock", "instock",
+        "в наявності", "є в наявності", "наявний", "есть в наличии",
+        "доступно", "available_for_order"
+    }
 
-        if presence is True or presence == 1:
-            return True
+    negative = {
+        "0", "false", "no", "none", "null", "not_available", "out_of_stock",
+        "немає", "немає в наявності", "нет", "нет в наличии", "відсутній",
+        "отсутствует", "не в наличии"
+    }
 
-        if presence is False or presence == 0:
+    for value in candidates:
+        value = localize(value)
+
+        if value is None or value == "":
             continue
 
-        if presence is None:
-            continue
+        if isinstance(value, bool):
+            return value
 
-        value = str(presence).strip().lower()
+        if isinstance(value, (int, float)):
+            return value > 0
 
-        negative_values = [
-            "",
-            "0",
-            "false",
-            "no",
-            "none",
-            "null",
-            "not_available",
-            "out_of_stock",
-            "unavailable",
-            "немає",
-            "немає в наявності",
-            "нет",
-            "нет в наличии",
-            "відсутній",
-            "отсутствует",
-            "під замовлення",
-            "под заказ",
-        ]
+        text = str(value).strip().lower()
 
-        positive_values = [
-            "1",
-            "true",
-            "yes",
-            "available",
-            "in_stock",
-            "в наявності",
-            "є в наявності",
-            "есть в наличии",
-            "наявний",
-            "доступний",
-        ]
+        if text in negative:
+            return False
 
-        if value in negative_values:
-            continue
-
-        if any(word in value for word in positive_values):
+        if text in positive:
             return True
 
         try:
-            if float(value.replace(",", ".")) > 0:
-                return True
+            return float(text.replace(",", ".")) > 0
         except ValueError:
             pass
 
     return False
 
 
-def product_link(product: dict) -> str:
-    link = localized(product.get("link"))
-    if not link:
-        return ""
-    link = str(link).strip()
-    if link.startswith("http://") or link.startswith("https://"):
-        return link
-    if not link.startswith("/"):
-        link = "/" + link
-    return SITE_URL + link
+async def get_all_products(max_items: int = 2000, batch_size: int = 500) -> list[dict]:
+    products: list[dict] = []
+    offset = 0
 
+    while len(products) < max_items:
+        batch = await shop.get_products(limit=batch_size, offset=offset)
+        if not batch:
+            break
 
-def first_image_url(product: dict) -> str:
-    images = product.get("images") or product.get("image") or []
+        products.extend(batch)
 
-    if isinstance(images, str):
-        return images
+        if len(batch) < batch_size:
+            break
 
-    if isinstance(images, dict):
-        for key in ("url", "src", "image", "original", "big", "thumb"):
-            value = images.get(key)
-            if isinstance(value, str) and value.startswith("http"):
-                return value
-        images = list(images.values())
+        offset += batch_size
+        await asyncio.sleep(0.4)
 
-    if isinstance(images, list):
-        for image in images:
-            if isinstance(image, str) and image.startswith("http"):
-                return image
-            if isinstance(image, dict):
-                for key in ("url", "src", "image", "original", "big", "thumb"):
-                    value = image.get(key)
-                    if isinstance(value, str) and value.startswith("http"):
-                        return value
-
-    return ""
+    return products[:max_items]
 
 
 def product_post_text(product: dict) -> str:
-    title = escape(str(localized(product.get("title"))))
-    price = escape(str(localized(product.get("price")) or "-"))
+    title = localize(product.get("title"))
+    price = product_price(product)
     link = product_link(product)
 
-    text = f"🍬 <b>{title}</b>\n\n💰 {price} грн"
-    if link:
-        text += f"\n\n🔗 <a href=\"{escape(link)}\">Дивитися товар</a>"
-    return text
+    return (
+        f"🍬 <b>{title}</b>\n\n"
+        f"✅ В наявності\n"
+        f"💰 Ціна: <b>{price} грн</b>\n\n"
+        f"🔗 Замовити:\n{link}\n\n"
+        f"🤖 Бот магазину: {BOT_URL}"
+    )
 
 
-async def load_all_products(limit: int = 500, max_pages: int = 50):
-    all_products = []
-    offset = 0
+async def send_product_to_channel(product: dict) -> bool:
+    title = localize(product.get("title"))
+    if not title:
+        return False
 
-    for _ in range(max_pages):
-        products = await shop.get_products(limit=limit, offset=offset)
-        if not products:
-            break
+    text = product_post_text(product)
+    image_url = get_image_url(product)
 
-        all_products.extend(products)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 Купити", url=product_link(product))],
+            [InlineKeyboardButton(text="🤖 Відкрити бота", url=BOT_URL)],
+        ]
+    )
 
-        if len(products) < limit:
-            break
-
-        offset += limit
-
-    return all_products
+    try:
+        if image_url:
+            await bot.send_photo(
+                CHANNEL_USERNAME,
+                photo=image_url,
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        else:
+            await bot.send_message(
+                CHANNEL_USERNAME,
+                text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        return True
+    except Exception as e:
+        logging.exception("Cannot publish product: %s", e)
+        return False
 
 
 @dp.message(CommandStart())
@@ -219,66 +255,51 @@ async def start(message: Message):
     )
 
 
+@dp.message(Command("pin_menu"))
+async def pin_menu(message: Message):
+    await bot.send_message(
+        CHANNEL_USERNAME,
+        "🍬 <b>OKVEJ | Солодощі та подарунки</b>\n\n"
+        "✅ Оптові та роздрібні замовлення\n"
+        "🌐 Наш сайт: https://okvej.com.ua\n\n"
+        "Оберіть потрібний розділ 👇",
+        parse_mode="HTML",
+        reply_markup=catalog_buttons(),
+    )
+
+    await message.answer("✅ Меню з активними кнопками опубліковано в канал. Тепер закріпіть його вручну.")
+
+
 @dp.message(Command("publish_catalog"))
 async def publish_catalog(message: Message):
-    await message.answer(f"Починаю публікацію товарів у канал {CHANNEL_USERNAME}...")
+    await message.answer(
+        "🚀 Починаю публікацію товарів у канал.\n"
+        "Публікую тільки товари в наявності."
+    )
 
-    try:
-        products = await load_all_products()
-        in_stock_products = [p for p in products if is_in_stock(p)]
+    products = await get_all_products(max_items=2000, batch_size=500)
+    in_stock_products = [p for p in products if is_in_stock(p)]
 
-        if not in_stock_products:
-            await message.answer("Не знайшов товарів у наявності для публікації.")
-            return
+    if not in_stock_products:
+        await message.answer("😔 Не знайшов товарів у наявності. Треба перевірити поле наявності в API.")
+        return
 
-        published = 0
-        failed = 0
-        seen = set()
+    published = 0
+    failed = 0
 
-        for product in in_stock_products:
-            title = str(localized(product.get("title"))).strip()
-            link = product_link(product)
-            article = str(localized(product.get("article"))).strip()
-            unique_key = article or link or title
+    for product in in_stock_products:
+        ok = await send_product_to_channel(product)
+        if ok:
+            published += 1
+        else:
+            failed += 1
+        await asyncio.sleep(1.2)
 
-            if unique_key in seen:
-                continue
-            seen.add(unique_key)
-
-            text = product_post_text(product)
-            image_url = first_image_url(product)
-
-            try:
-                if image_url:
-                    await bot.send_photo(
-                        chat_id=CHANNEL_USERNAME,
-                        photo=image_url,
-                        caption=text,
-                        parse_mode="HTML",
-                    )
-                else:
-                    await bot.send_message(
-                        chat_id=CHANNEL_USERNAME,
-                        text=text,
-                        parse_mode="HTML",
-                        disable_web_page_preview=False,
-                    )
-                published += 1
-                await asyncio.sleep(0.6)
-            except Exception as e:
-                failed += 1
-                logging.exception("Failed to publish product %s: %s", title, e)
-                await asyncio.sleep(0.6)
-
-        await message.answer(
-            f"Готово ✅\n"
-            f"Опубліковано: {published}\n"
-            f"Помилок: {failed}\n"
-            f"Канал: {CHANNEL_USERNAME}"
-        )
-
-    except Exception as e:
-        await message.answer(f"❌ Помилка публікації: {e}")
+    await message.answer(
+        f"✅ Публікацію завершено.\n\n"
+        f"Опубліковано: {published}\n"
+        f"Помилок: {failed}"
+    )
 
 
 @dp.message(F.text == "📢 Канал OKVEJ")
@@ -296,17 +317,10 @@ async def channel(message: Message):
 
 @dp.message(F.text == "🍬 Каталог")
 async def catalog(message: Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🍫 Перейти в каталог", url="https://okvej.com.ua/")],
-            [InlineKeyboardButton(text="🎁 Подарункові набори", url="https://okvej.com.ua/")],
-        ]
-    )
     await message.answer(
         "🍬 <b>Каталог OKVEJ</b>\n\n"
-        "Поки каталог відкривається на сайті.\n"
-        "Наступним етапом ми підключимо товари прямо в Telegram через API Хорошоп.",
-        reply_markup=keyboard,
+        "Оберіть потрібну категорію 👇",
+        reply_markup=catalog_buttons(),
         parse_mode="HTML",
     )
 
@@ -342,14 +356,14 @@ async def process_search(message: Message, state: FSMContext):
         return
 
     try:
-        products = await shop.get_products(limit=500)
+        products = await get_all_products(max_items=1000, batch_size=500)
         results = []
 
         for product in products:
             if not is_in_stock(product):
                 continue
 
-            title = localized(product.get("title"))
+            title = localize(product.get("title"))
             if query in title.lower():
                 results.append(product)
 
@@ -359,14 +373,15 @@ async def process_search(message: Message, state: FSMContext):
             text = "🍬 Знайдені товари в наявності:\n\n"
 
             for p in results[:10]:
-                title = escape(str(localized(p.get("title"))))
-                price = escape(str(localized(p.get("price")) or "-"))
+                title = localize(p.get("title"))
+                price = product_price(p)
                 link = product_link(p)
 
-                text += f"• <b>{title}</b>\n💰 {price} грн"
-                if link:
-                    text += f"\n🔗 {link}"
-                text += "\n\n"
+                text += (
+                    f"• <b>{title}</b>\n"
+                    f"💰 {price} грн\n"
+                    f"🔗 {link}\n\n"
+                )
 
             await message.answer(text, parse_mode="HTML")
 
@@ -389,14 +404,13 @@ async def cart(message: Message):
 
 @dp.message(F.text == "🌐 Сайт")
 async def site(message: Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🌐 Відкрити OKVEJ", url="https://okvej.com.ua/")]
-        ]
-    )
     await message.answer(
         "🌐 Наш сайт:\n\nhttps://okvej.com.ua",
-        reply_markup=keyboard,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Відкрити OKVEJ", url=SITE_URL)]
+            ]
+        ),
     )
 
 
@@ -404,8 +418,7 @@ async def site(message: Message):
 async def manager(message: Message):
     await message.answer(
         "💬 <b>Зв'язатися з менеджером</b>\n\n"
-        "Напишіть сюди:\n"
-        "@okvej_manager",
+        f"Напишіть сюди:\n@{MANAGER_USERNAME.lstrip('@')}",
         parse_mode="HTML",
     )
 
