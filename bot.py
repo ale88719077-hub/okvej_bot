@@ -64,6 +64,7 @@ def catalog_buttons():
             [InlineKeyboardButton(text="🍫 Шоколад", url="https://okvej.com.ua/ua/shokolad/")],
             [InlineKeyboardButton(text="💬 Менеджер", url=f"https://t.me/{MANAGER_USERNAME.lstrip('@')}")],
             [InlineKeyboardButton(text="🌐 Сайт", url=SITE_URL)],
+            [InlineKeyboardButton(text="⭐ Відгуки", url="https://okvej.com.ua/ua/otzyvy-o-magazine/")],
             [InlineKeyboardButton(text="🤖 Відкрити бота", url=BOT_URL)],
         ]
     )
