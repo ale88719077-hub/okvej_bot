@@ -1,14 +1,17 @@
 import asyncio
-import json
 import logging
 import os
+from collections import defaultdict
 from urllib.parse import urljoin
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+)
 
 from horoshop_api import HoroshopAPI
 
@@ -18,30 +21,39 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@okvej")
 SITE_URL = "https://okvej.com.ua/"
-BOT_URL = "https://t.me/okvej_shop_bot"
-MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd")
-AUTO_PUBLISH_INTERVAL = int(os.getenv("AUTO_PUBLISH_INTERVAL", "600"))
-PUBLISHED_FILE = "published_products.json"
+MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
+MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
 shop = HoroshopAPI(
     domain=os.getenv("HOROSHOP_DOMAIN", "okvej.com.ua"),
     login=os.getenv("HOROSHOP_LOGIN"),
     password=os.getenv("HOROSHOP_PASSWORD"),
 )
 
+# Корзины хранятся в памяти. После перезапуска Railway они очищаются.
+user_carts = defaultdict(dict)
+product_cache = {}
+
 
 class SearchState(StatesGroup):
     waiting_query = State()
 
 
+class CheckoutState(StatesGroup):
+    waiting_name = State()
+    waiting_phone = State()
+    waiting_city = State()
+    waiting_branch = State()
+    waiting_comment = State()
+    waiting_confirm = State()
+
+
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔥 Акції")],
+        [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🚚 Доставка й оплата")],
         [KeyboardButton(text="🔍 Пошук товару"), KeyboardButton(text="🛒 Кошик")],
         [KeyboardButton(text="🌐 Сайт"), KeyboardButton(text="💬 Менеджер")],
         [KeyboardButton(text="📢 Канал OKVEJ")],
@@ -50,98 +62,78 @@ main_menu = ReplyKeyboardMarkup(
 )
 
 
-def catalog_buttons():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍬 Цукерки вагові", url="https://okvej.com.ua/ua/konfety-vesovye/")],
-        [InlineKeyboardButton(text="🍭 Карамель", url="https://okvej.com.ua/ua/karamel-v-miahkoi-upakovke/")],
-        [InlineKeyboardButton(text="🎁 Подарунки", url="https://okvej.com.ua/ua/nabory-podarochnykh-konfet/")],
-        [InlineKeyboardButton(text="🍪 Печиво", url="https://okvej.com.ua/ua/pechene-y-muchnye-yzdelyia/")],
-        [InlineKeyboardButton(text="☁️ Зефір та мармелад", url="https://okvej.com.ua/ua/zefyr-y-marmelad/")],
-        [InlineKeyboardButton(text="🍫 Шоколад", url="https://okvej.com.ua/ua/shokolad/")],
-        [InlineKeyboardButton(text="💬 Менеджер", url=f"https://t.me/{MANAGER_USERNAME.lstrip('@')}")],
-        [InlineKeyboardButton(text="🌐 Сайт", url=SITE_URL)],
-        [InlineKeyboardButton(text="⭐ Відгуки", url="https://okvej.com.ua/ua/otzyvy-o-magazine/")],
-        [InlineKeyboardButton(text="🤖 Відкрити бота", url=BOT_URL)],
-    ])
-
-
 def localize(value):
     if isinstance(value, dict):
-        return value.get("ua") or value.get("uk") or value.get("ru") or value.get("ru_RU") or value.get("uk_UA") or next(iter(value.values()), "")
+        return value.get("ua") or value.get("uk") or value.get("ru") or next(iter(value.values()), "")
     return value or ""
 
 
-def product_link(product: dict) -> str:
+def product_link(product):
     link = localize(product.get("link") or product.get("url") or "")
     if not link:
         return SITE_URL
-    if link.startswith("http"):
-        return link
-    return urljoin(SITE_URL, link.lstrip("/"))
+    return link if str(link).startswith("http") else urljoin(SITE_URL, str(link).lstrip("/"))
 
 
-def product_id(product: dict) -> str:
-    value = product.get("id") or product.get("article") or product.get("sku") or product.get("code") or product.get("modification_id") or product_link(product) or localize(product.get("title"))
-    return str(value)
+def product_key(product):
+    raw = str(product.get("id") or product.get("article") or product_link(product))
+    return str(abs(hash(raw)))
 
 
-def product_price(product: dict) -> str:
-    price = product.get("price") or product.get("price_old") or product.get("cost") or "-"
-    if isinstance(price, dict):
-        price = price.get("value") or price.get("price") or next(iter(price.values()), "-")
-    return str(price)
-
-
-def get_image_url(product: dict):
-    images = product.get("images") or product.get("image") or product.get("photo")
-    url = None
-    if isinstance(images, list) and images:
-        first = images[0]
-        url = first.get("url") or first.get("src") or first.get("image") or first.get("big") if isinstance(first, dict) else str(first)
-    elif isinstance(images, dict):
-        url = images.get("url") or images.get("src") or images.get("image") or images.get("big")
-    elif isinstance(images, str):
-        url = images
-    if not url:
-        return None
-    return url if url.startswith("http") else urljoin(SITE_URL, url.lstrip("/"))
-
-
-def is_in_stock(product: dict) -> bool:
-    candidates = [product.get("presence"), product.get("available"), product.get("in_stock"), product.get("stock"), product.get("quantity"), product.get("count"), product.get("balance")]
-    positive = {"1", "true", "yes", "available", "in_stock", "instock", "в наявності", "є в наявності", "наявний", "есть в наличии", "доступно", "available_for_order"}
-    negative = {"0", "false", "no", "none", "null", "not_available", "out_of_stock", "немає", "немає в наявності", "нет", "нет в наличии", "відсутній", "отсутствует", "не в наличии"}
-    for value in candidates:
-        value = localize(value)
-        if value is None or value == "":
-            continue
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return value > 0
-        text = str(value).strip().lower()
-        if text in negative:
-            return False
-        if text in positive:
-            return True
-        try:
-            return float(text.replace(",", ".")) > 0
-        except ValueError:
-            pass
-    return False
-
-
-def load_published_ids():
+def price_number(product):
+    value = product.get("price") or product.get("cost") or 0
+    if isinstance(value, dict):
+        value = value.get("value") or value.get("price") or next(iter(value.values()), 0)
     try:
-        with open(PUBLISHED_FILE, "r", encoding="utf-8") as f:
-            return set(map(str, json.load(f)))
-    except Exception:
-        return set()
+        return float(str(value).replace("грн", "").replace(" ", "").replace(",", "."))
+    except ValueError:
+        return 0.0
 
 
-def save_published_ids(ids):
-    with open(PUBLISHED_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(ids), f, ensure_ascii=False, indent=2)
+def normalize_stock(value):
+    value = localize(value)
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value > 0
+
+    text = str(value).strip().lower()
+    negatives = {
+        "0", "false", "no", "none", "null", "not_available", "out_of_stock",
+        "немає", "немає в наявності", "відсутній", "нет", "нет в наличии",
+        "отсутствует", "не в наличии",
+    }
+    positives = {
+        "1", "true", "yes", "available", "in_stock", "instock",
+        "в наявності", "є в наявності", "наявний", "есть в наличии", "доступно",
+    }
+    if text in negatives:
+        return False
+    if text in positives:
+        return True
+    try:
+        return float(text.replace(",", ".")) > 0
+    except ValueError:
+        return None
+
+
+def is_in_stock(product):
+    signals = [
+        normalize_stock(product.get("presence")),
+        normalize_stock(product.get("available")),
+        normalize_stock(product.get("in_stock")),
+        normalize_stock(product.get("stock")),
+        normalize_stock(product.get("quantity")),
+        normalize_stock(product.get("count")),
+        normalize_stock(product.get("balance")),
+    ]
+    # Любой явный ноль/нет наличия блокирует товар.
+    if False in signals:
+        return False
+    # Нужен хотя бы один положительный сигнал.
+    return True in signals
 
 
 async def get_all_products(max_items=2000, batch_size=500):
@@ -152,181 +144,345 @@ async def get_all_products(max_items=2000, batch_size=500):
         if not batch:
             break
         products.extend(batch)
+        for product in batch:
+            product_cache[product_key(product)] = product
         if len(batch) < batch_size:
             break
         offset += batch_size
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.3)
     return products[:max_items]
 
 
-def product_post_text(product):
-    return (f"🍬 <b>{localize(product.get('title'))}</b>\n\n"
-            f"✅ В наявності\n"
-            f"💰 Ціна: <b>{product_price(product)} грн</b>\n\n"
-            f"🔗 Замовити:\n{product_link(product)}\n\n"
-            f"🤖 Бот магазину: {BOT_URL}")
+def product_text(product):
+    title = localize(product.get("title"))
+    price = price_number(product)
+    return (
+        f"🍬 <b>{title}</b>\n\n"
+        f"✅ В наявності\n"
+        f"💰 Ціна: <b>{price:g} грн</b>\n"
+        f"🔗 {product_link(product)}"
+    )
 
 
-async def send_product_to_channel(product):
-    if not localize(product.get("title")):
-        return False
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 Купити", url=product_link(product))],
-        [InlineKeyboardButton(text="🤖 Відкрити бота", url=BOT_URL)],
+def product_keyboard(product):
+    key = product_key(product)
+    product_cache[key] = product
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Додати в кошик", callback_data=f"add:{key}")],
+        [InlineKeyboardButton(text="🛒 Купити на сайті", url=product_link(product))],
     ])
-    try:
-        image_url = get_image_url(product)
-        if image_url:
-            await bot.send_photo(CHANNEL_USERNAME, photo=image_url, caption=product_post_text(product), parse_mode="HTML", reply_markup=keyboard)
-        else:
-            await bot.send_message(CHANNEL_USERNAME, product_post_text(product), parse_mode="HTML", reply_markup=keyboard)
-        return True
-    except Exception as e:
-        logging.exception("Cannot publish product: %s", e)
-        return False
 
 
-async def publish_new_products(limit_new=None):
-    published_ids = load_published_ids()
-    products = await get_all_products(max_items=2000, batch_size=500)
-    published = skipped = failed = 0
-    for product in products:
-        if not is_in_stock(product):
+def cart_view(user_id):
+    cart = user_carts[user_id]
+    if not cart:
+        text = "🛒 <b>Кошик порожній</b>\n\nЗнайдіть товар і натисніть «➕ Додати в кошик»."
+    else:
+        lines = ["🛒 <b>Ваш кошик</b>\n"]
+        total = 0.0
+        for key, qty in cart.items():
+            product = product_cache.get(key)
+            if not product:
+                continue
+            price = price_number(product)
+            subtotal = price * qty
+            total += subtotal
+            lines.append(f"• <b>{localize(product.get('title'))}</b>\n  {qty} × {price:g} = {subtotal:g} грн")
+        lines.append(f"\n💰 <b>Разом: {total:g} грн</b>")
+        text = "\n".join(lines)
+
+    rows = []
+    for key in cart:
+        product = product_cache.get(key)
+        if product:
+            title = localize(product.get("title"))[:25]
+            rows.append([InlineKeyboardButton(text=f"➖ {title}", callback_data=f"remove:{key}")])
+    rows.extend([
+        [InlineKeyboardButton(text="🗑 Очистити кошик", callback_data="clear_cart")],
+        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="checkout_start")],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data.startswith("add:"))
+async def add_to_cart(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    product = product_cache.get(key)
+    if not product:
+        await callback.answer("Товар не знайдено. Повторіть пошук.", show_alert=True)
+        return
+    if not is_in_stock(product):
+        await callback.answer("Товару вже немає в наявності.", show_alert=True)
+        return
+    user_carts[callback.from_user.id][key] = user_carts[callback.from_user.id].get(key, 0) + 1
+    await callback.answer("✅ Додано в кошик")
+
+
+@dp.callback_query(F.data.startswith("remove:"))
+async def remove_from_cart(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    cart = user_carts[callback.from_user.id]
+    if key in cart:
+        cart[key] -= 1
+        if cart[key] <= 0:
+            cart.pop(key, None)
+    text, keyboard = cart_view(callback.from_user.id)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "clear_cart")
+async def clear_cart(callback: CallbackQuery):
+    user_carts[callback.from_user.id].clear()
+    text, keyboard = cart_view(callback.from_user.id)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer("Кошик очищено")
+
+
+def build_order_text(user_id: int, data: dict) -> str:
+    cart = user_carts[user_id]
+    lines = [
+        "🆕 <b>Нове замовлення з Telegram</b>",
+        "",
+        f"👤 Ім'я: {data.get('name', '-')}",
+        f"📞 Телефон: {data.get('phone', '-')}",
+        f"🏙 Місто: {data.get('city', '-')}",
+        f"📦 Відділення/адреса: {data.get('branch', '-')}",
+        f"💬 Коментар: {data.get('comment', '-')}",
+        "",
+        "🛒 <b>Товари:</b>",
+    ]
+
+    total = 0.0
+    for key, qty in cart.items():
+        product = product_cache.get(key)
+        if not product:
             continue
-        pid = product_id(product)
-        if pid in published_ids:
-            skipped += 1
-            continue
-        ok = await send_product_to_channel(product)
-        if ok:
-            published_ids.add(pid)
-            save_published_ids(published_ids)
-            published += 1
-        else:
-            failed += 1
-        if limit_new and published >= limit_new:
-            break
-        await asyncio.sleep(1.2)
-    return published, skipped, failed
+        price = price_number(product)
+        subtotal = price * qty
+        total += subtotal
+        lines.append(
+            f"• {localize(product.get('title'))}\n"
+            f"  {qty} × {price:g} грн = {subtotal:g} грн\n"
+            f"  {product_link(product)}"
+        )
+
+    lines.append("")
+    lines.append(f"💰 <b>Разом: {total:g} грн</b>")
+    lines.append(f"🆔 Telegram ID: <code>{user_id}</code>")
+    return "\n".join(lines)
 
 
-async def auto_publish_loop():
-    await asyncio.sleep(10)
-    published_ids = load_published_ids()
-    if not published_ids:
+@dp.callback_query(F.data == "checkout_start")
+async def checkout_start(callback: CallbackQuery, state: FSMContext):
+    if not user_carts[callback.from_user.id]:
+        await callback.answer("Кошик порожній.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(CheckoutState.waiting_name)
+    await callback.message.answer("👤 Введіть ваше ім'я:")
+    await callback.answer()
+
+
+@dp.message(CheckoutState.waiting_name)
+async def checkout_name(message: Message, state: FSMContext):
+    await state.update_data(name=(message.text or "").strip())
+    await state.set_state(CheckoutState.waiting_phone)
+    await message.answer("📞 Введіть номер телефону:")
+
+
+@dp.message(CheckoutState.waiting_phone)
+async def checkout_phone(message: Message, state: FSMContext):
+    phone = (message.text or "").strip()
+    if len(phone) < 7:
+        await message.answer("Введіть коректний номер телефону:")
+        return
+    await state.update_data(phone=phone)
+    await state.set_state(CheckoutState.waiting_city)
+    await message.answer("🏙 Вкажіть місто:")
+
+
+@dp.message(CheckoutState.waiting_city)
+async def checkout_city(message: Message, state: FSMContext):
+    await state.update_data(city=(message.text or "").strip())
+    await state.set_state(CheckoutState.waiting_branch)
+    await message.answer("📦 Вкажіть відділення Нової пошти або адресу доставки:")
+
+
+@dp.message(CheckoutState.waiting_branch)
+async def checkout_branch(message: Message, state: FSMContext):
+    await state.update_data(branch=(message.text or "").strip())
+    await state.set_state(CheckoutState.waiting_comment)
+    await message.answer(
+        "💬 Додайте коментар до замовлення.\n"
+        "Якщо коментаря немає — напишіть «немає»."
+    )
+
+
+@dp.message(CheckoutState.waiting_comment)
+async def checkout_comment(message: Message, state: FSMContext):
+    comment = (message.text or "").strip()
+    await state.update_data(comment=comment)
+
+    data = await state.get_data()
+    order_text = build_order_text(message.from_user.id, data)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Підтвердити", callback_data="checkout_confirm")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="checkout_cancel")],
+    ])
+
+    await state.set_state(CheckoutState.waiting_confirm)
+    await message.answer(
+        "Перевірте замовлення:\n\n" + order_text,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+@dp.callback_query(F.data == "checkout_cancel")
+async def checkout_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("❌ Оформлення скасовано.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "checkout_confirm")
+async def checkout_confirm(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    order_text = build_order_text(callback.from_user.id, data)
+
+    if MANAGER_CHAT_ID:
         try:
-            products = await get_all_products(max_items=2000, batch_size=500)
-            for product in products:
-                if is_in_stock(product):
-                    published_ids.add(product_id(product))
-            save_published_ids(published_ids)
-            logging.info("Initial catalog snapshot saved: %s products", len(published_ids))
-        except Exception:
-            logging.exception("Initial auto-publish snapshot failed")
-    while True:
-        try:
-            published, skipped, failed = await publish_new_products(limit_new=20)
-            logging.info("Auto publish done. published=%s skipped=%s failed=%s", published, skipped, failed)
-        except Exception:
-            logging.exception("Auto publish loop error")
-        await asyncio.sleep(AUTO_PUBLISH_INTERVAL)
+            await bot.send_message(
+                int(MANAGER_CHAT_ID),
+                order_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            await callback.message.answer(
+                "✅ Замовлення надіслано менеджеру.\n"
+                "Ми зв'яжемося з вами для підтвердження."
+            )
+            user_carts[callback.from_user.id].clear()
+            await state.clear()
+        except Exception as e:
+            logging.exception("Cannot send order to manager")
+            await callback.message.answer(
+                "❌ Не вдалося автоматично надіслати замовлення менеджеру.\n"
+                f"Напишіть менеджеру: https://t.me/{MANAGER_USERNAME}\n\n"
+                "Ваше замовлення:\n\n" + order_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+    else:
+        await callback.message.answer(
+            "⚠️ У Railway не задано MANAGER_CHAT_ID.\n"
+            f"Напишіть менеджеру: https://t.me/{MANAGER_USERNAME}\n\n"
+            "Ваше замовлення:\n\n" + order_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    await callback.answer()
 
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    await message.answer("🍬 <b>Вітаємо в OKVEJ!</b>\n\nОберіть потрібний розділ 👇", reply_markup=main_menu, parse_mode="HTML")
+
+    await message.answer("🍬 <b>Вітаємо в OKVEJ!</b>", parse_mode="HTML", reply_markup=main_menu)
 
 
-@dp.message(Command("pin_menu"))
-async def pin_menu(message: Message):
-    await bot.send_message(CHANNEL_USERNAME, "🍬 <b>OKVEJ | Солодощі та подарунки</b>\n\n✅ Оптові та роздрібні замовлення\n🌐 Наш сайт: https://okvej.com.ua\n\nОберіть потрібний розділ 👇", parse_mode="HTML", reply_markup=catalog_buttons())
-    await message.answer("✅ Меню з активними кнопками опубліковано в канал. Тепер закріпіть його вручну.")
 
 
-@dp.message(Command("publish_catalog"))
-async def publish_catalog(message: Message):
-    await message.answer("🚀 Починаю публікацію нових товарів у канал. Публікую тільки товари в наявності, яких ще не було в каналі.")
-    published, skipped, failed = await publish_new_products(limit_new=None)
-    await message.answer(f"✅ Публікацію завершено.\n\nОпубліковано нових: {published}\nВже були пропущені: {skipped}\nПомилок: {failed}")
+@dp.message(Command("myid"))
+async def my_id(message: Message):
+    await message.answer(
+        f"Ваш Telegram chat ID: <code>{message.chat.id}</code>",
+        parse_mode="HTML",
+    )
 
 
-@dp.message(Command("reset_published"))
-async def reset_published(message: Message):
-    save_published_ids(set())
-    await message.answer("♻️ Список опубликованных товаров очищен. После перезапуска бот заново сделает снимок каталога.")
-
-
-@dp.message(F.text == "📢 Канал OKVEJ")
-async def channel(message: Message):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Перейти в канал OKVEJ", url="https://t.me/okvej")]])
-    await message.answer("📢 Наш Telegram-канал OKVEJ:\n\nhttps://t.me/okvej", reply_markup=keyboard)
+@dp.message(F.text == "🚚 Доставка й оплата")
+async def delivery(message: Message):
+    await message.answer(
+        "🚚 <b>Доставка й оплата</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Відкрити умови", url="https://okvej.com.ua/ua/dostavka-i-oplata/")
+        ]]),
+    )
 
 
 @dp.message(F.text == "🍬 Каталог")
 async def catalog(message: Message):
-    await message.answer("🍬 <b>Каталог OKVEJ</b>\n\nОберіть потрібну категорію 👇", reply_markup=catalog_buttons(), parse_mode="HTML")
-
-
-@dp.message(F.text == "🔥 Акції")
-async def sales(message: Message):
-    await message.answer("🔥 <b>Акції OKVEJ</b>\n\nСкоро тут будуть спеціальні пропозиції.\nhttps://okvej.com.ua", parse_mode="HTML")
+    await message.answer(
+        "🍬 Каталог OKVEJ",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🍬 Цукерки вагові", url="https://okvej.com.ua/ua/konfety-vesovye/")],
+            [InlineKeyboardButton(text="🍭 Карамель", url="https://okvej.com.ua/ua/karamel-v-miahkoi-upakovke/")],
+            [InlineKeyboardButton(text="🎁 Подарунки", url="https://okvej.com.ua/ua/nabory-podarochnykh-konfet/")],
+            [InlineKeyboardButton(text="🍪 Печиво", url="https://okvej.com.ua/ua/pechene-y-muchnye-yzdelyia/")],
+            [InlineKeyboardButton(text="☁️ Зефір та мармелад", url="https://okvej.com.ua/ua/zefyr-y-marmelad/")],
+            [InlineKeyboardButton(text="🍫 Шоколад", url="https://okvej.com.ua/ua/shokolad/")],
+            [InlineKeyboardButton(text="🚚 Доставка й оплата", url="https://okvej.com.ua/ua/dostavka-i-oplata/")],
+        ]),
+    )
 
 
 @dp.message(F.text == "🔍 Пошук товару")
-async def search(message: Message, state: FSMContext):
+async def search_start(message: Message, state: FSMContext):
     await state.set_state(SearchState.waiting_query)
-    await message.answer("🔍 Введіть назву товару, наприклад:\n\n• марципан\n• печиво\n• шоколад")
+    await message.answer("🔍 Введіть назву товару")
 
 
 @dp.message(SearchState.waiting_query)
-async def process_search(message: Message, state: FSMContext):
+async def search_products(message: Message, state: FSMContext):
     query = (message.text or "").strip().lower()
-    if not query:
-        await message.answer("Введіть назву товару текстом 👇")
-        return
     try:
-        products = await get_all_products(max_items=1000, batch_size=500)
-        results = []
-        for product in products:
-            if not is_in_stock(product):
-                continue
-            title = localize(product.get("title"))
-            if query in title.lower():
-                results.append(product)
+        products = await get_all_products()
+        results = [
+            p for p in products
+            if is_in_stock(p) and query in localize(p.get("title")).lower()
+        ]
         if not results:
             await message.answer("😔 Нічого не знайдено в наявності.")
         else:
-            text = "🍬 Знайдені товари в наявності:\n\n"
-            for p in results[:10]:
-                text += f"• <b>{localize(p.get('title'))}</b>\n💰 {product_price(p)} грн\n🔗 {product_link(p)}\n\n"
-            await message.answer(text, parse_mode="HTML")
+            for product in results[:10]:
+                await message.answer(
+                    product_text(product),
+                    parse_mode="HTML",
+                    reply_markup=product_keyboard(product),
+                )
     except Exception as e:
+        logging.exception("Search error")
         await message.answer(f"❌ Помилка: {e}")
     await state.clear()
 
 
 @dp.message(F.text == "🛒 Кошик")
-async def cart(message: Message):
-    await message.answer("🛒 <b>Кошик</b>\n\nКошик поки порожній.", parse_mode="HTML")
+async def show_cart(message: Message):
+    text, keyboard = cart_view(message.from_user.id)
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 @dp.message(F.text == "🌐 Сайт")
 async def site(message: Message):
-    await message.answer("🌐 Наш сайт:\n\nhttps://okvej.com.ua", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🌐 Відкрити OKVEJ", url=SITE_URL)]]))
+    await message.answer(SITE_URL)
 
 
 @dp.message(F.text == "💬 Менеджер")
 async def manager(message: Message):
-    await message.answer(f"💬 <b>Зв'язатися з менеджером</b>\n\nНапишіть сюди:\n@{MANAGER_USERNAME.lstrip('@')}", parse_mode="HTML")
+    await message.answer(f"https://t.me/{MANAGER_USERNAME}")
 
 
-@dp.message()
-async def unknown_message(message: Message):
-    await message.answer("Я вас зрозумів 👍\n\nОберіть дію з меню нижче 👇", reply_markup=main_menu)
+@dp.message(F.text == "📢 Канал OKVEJ")
+async def channel(message: Message):
+    await message.answer("https://t.me/okvej")
 
 
 async def main():
-    asyncio.create_task(auto_publish_loop())
     await dp.start_polling(bot)
 
 
