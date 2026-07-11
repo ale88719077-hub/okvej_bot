@@ -24,9 +24,6 @@ if not TOKEN:
 SITE_URL = "https://okvej.com.ua/"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
-import os
-logging.info(f"ENV MANAGER_CHAT_ID = {os.environ.get('MANAGER_CHAT_ID')}")
-logging.info(f"All env keys = {list(os.environ.keys())}")
 logging.info("MANAGER_CHAT_ID configured: %s", bool(MANAGER_CHAT_ID))
 
 bot = Bot(token=TOKEN)
@@ -95,28 +92,151 @@ def price_number(product):
 
 
 def normalize_stock(value):
-    value = localize(value)
+    """
+    Нормализует поле наличия Horoshop.
+
+    Важно: Horoshop может вернуть presence не строкой, а словарём,
+    например {"id": 2, "title": {"ua": "Немає в наявності"}}.
+    Старый код мог взять первым значение id=2 и ошибочно считать товар доступным.
+    """
     if value is None or value == "":
         return None
+
     if isinstance(value, bool):
         return value
+
     if isinstance(value, (int, float)):
         return value > 0
 
+    if isinstance(value, dict):
+        # Сначала проверяем человекочитаемые поля, а не id.
+        preferred_keys = (
+            "title",
+            "name",
+            "text",
+            "label",
+            "status",
+            "value",
+            "presence",
+            "available",
+            "in_stock",
+            "stock",
+            "quantity",
+            "count",
+            "balance",
+        )
+
+        results = []
+
+        for key in preferred_keys:
+            if key in value:
+                result = normalize_stock(value.get(key))
+                if result is not None:
+                    results.append(result)
+
+        # Затем проверяем языковые значения.
+        for key in ("ua", "uk", "uk_UA", "ru", "ru_RU", "en"):
+            if key in value:
+                result = normalize_stock(value.get(key))
+                if result is not None:
+                    results.append(result)
+
+        # Явное «нет» всегда важнее числового id.
+        if False in results:
+            return False
+        if True in results:
+            return True
+
+        # id/code сами по себе не считаем доказательством наличия.
+        return None
+
+    if isinstance(value, (list, tuple, set)):
+        results = [normalize_stock(item) for item in value]
+        if False in results:
+            return False
+        if True in results:
+            return True
+        return None
+
     text = str(value).strip().lower()
+
     negatives = {
-        "0", "false", "no", "none", "null", "not_available", "out_of_stock",
-        "немає", "немає в наявності", "відсутній", "нет", "нет в наличии",
-        "отсутствует", "не в наличии",
+        "0",
+        "false",
+        "no",
+        "none",
+        "null",
+        "not_available",
+        "not available",
+        "out_of_stock",
+        "out of stock",
+        "outofstock",
+        "немає",
+        "немає в наявності",
+        "нема в наявності",
+        "відсутній",
+        "відсутня",
+        "відсутнє",
+        "нет",
+        "нет в наличии",
+        "не в наличии",
+        "отсутствует",
+        "відсутній на складі",
+        "продано",
+        "закінчився",
+        "закінчилося",
     }
+
     positives = {
-        "1", "true", "yes", "available", "in_stock", "instock",
-        "в наявності", "є в наявності", "наявний", "есть в наличии", "доступно",
+        "1",
+        "true",
+        "yes",
+        "available",
+        "in_stock",
+        "in stock",
+        "instock",
+        "в наявності",
+        "є в наявності",
+        "наявний",
+        "наявна",
+        "наявне",
+        "есть в наличии",
+        "доступно",
+        "available_for_order",
+        "готово до відправки",
     }
+
     if text in negatives:
         return False
+
     if text in positives:
         return True
+
+    # Дополнительная защита для длинных статусов.
+    negative_fragments = (
+        "немає в наявності",
+        "нема в наявності",
+        "нет в наличии",
+        "не в наличии",
+        "out of stock",
+        "not available",
+        "відсут",
+        "закінчив",
+        "продано",
+    )
+    if any(fragment in text for fragment in negative_fragments):
+        return False
+
+    positive_fragments = (
+        "є в наявності",
+        "в наявності",
+        "есть в наличии",
+        "in stock",
+        "available",
+    )
+    if any(fragment in text for fragment in positive_fragments):
+        return True
+
     try:
         return float(text.replace(",", ".")) > 0
     except ValueError:
