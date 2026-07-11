@@ -24,6 +24,9 @@ if not TOKEN:
 SITE_URL = "https://okvej.com.ua/"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
+import os
+logging.info(f"ENV MANAGER_CHAT_ID = {os.environ.get('MANAGER_CHAT_ID')}")
+logging.info(f"All env keys = {list(os.environ.keys())}")
 logging.info("MANAGER_CHAT_ID configured: %s", bool(MANAGER_CHAT_ID))
 
 bot = Bot(token=TOKEN)
