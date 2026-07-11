@@ -23,7 +23,8 @@ if not TOKEN:
 
 SITE_URL = "https://okvej.com.ua/"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
-MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")
+MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
+logging.info("MANAGER_CHAT_ID configured: %s", bool(MANAGER_CHAT_ID))
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -352,33 +353,49 @@ async def checkout_cancel(callback: CallbackQuery, state: FSMContext):
 async def checkout_confirm(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     order_text = build_order_text(callback.from_user.id, data)
+    manager_chat_id = (MANAGER_CHAT_ID or "").strip()
 
-    if MANAGER_CHAT_ID:
-        try:
-            await bot.send_message(
-                int(MANAGER_CHAT_ID),
-                order_text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            await callback.message.answer(
-                "✅ Замовлення надіслано менеджеру.\n"
-                "Ми зв'яжемося з вами для підтвердження."
-            )
-            user_carts[callback.from_user.id].clear()
-            await state.clear()
-        except Exception as e:
-            logging.exception("Cannot send order to manager")
-            await callback.message.answer(
-                "❌ Не вдалося автоматично надіслати замовлення менеджеру.\n"
-                f"Напишіть менеджеру: https://t.me/{MANAGER_USERNAME}\n\n"
-                "Ваше замовлення:\n\n" + order_text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-    else:
+    if not manager_chat_id:
         await callback.message.answer(
             "⚠️ У Railway не задано MANAGER_CHAT_ID.\n"
+            f"Напишіть менеджеру: https://t.me/{MANAGER_USERNAME}\n\n"
+            "Ваше замовлення:\n\n" + order_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        await callback.answer()
+        return
+
+    try:
+        chat_id = int(manager_chat_id)
+
+        await bot.send_message(
+            chat_id=chat_id,
+            text=order_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+        await callback.message.answer(
+            "✅ Замовлення надіслано менеджеру.\n"
+            "Ми зв'яжемося з вами для підтвердження."
+        )
+
+        user_carts[callback.from_user.id].clear()
+        await state.clear()
+
+    except ValueError:
+        logging.exception("MANAGER_CHAT_ID is not an integer")
+        await callback.message.answer(
+            "❌ MANAGER_CHAT_ID має містити тільки цифри.\n"
+            "Перевірте значення змінної в Railway."
+        )
+
+    except Exception as e:
+        logging.exception("Cannot send order to manager")
+        await callback.message.answer(
+            "❌ Не вдалося автоматично надіслати замовлення менеджеру.\n"
+            f"Помилка: {e}\n\n"
             f"Напишіть менеджеру: https://t.me/{MANAGER_USERNAME}\n\n"
             "Ваше замовлення:\n\n" + order_text,
             parse_mode="HTML",
