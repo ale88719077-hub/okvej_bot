@@ -575,11 +575,6 @@ async def checkout_confirm(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(F.text == "/пост")
 async def manual_post_start(message: Message, state: FSMContext):
-    # Команда доступна только менеджеру, чей ID указан в Railway.
-    if MANAGER_CHAT_ID and str(message.from_user.id) != str(MANAGER_CHAT_ID):
-        await message.answer("⛔ Эта команда доступна только администратору.")
-        return
-
     await state.clear()
     await state.set_state(PostState.waiting_link)
     await message.answer(
