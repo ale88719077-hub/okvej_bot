@@ -22,6 +22,8 @@ if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
 SITE_URL = "https://okvej.com.ua/"
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@okvej")
+BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
 logging.info("MANAGER_CHAT_ID configured: %s", bool(MANAGER_CHAT_ID))
@@ -41,6 +43,10 @@ product_cache = {}
 
 class SearchState(StatesGroup):
     waiting_query = State()
+
+
+class PostState(StatesGroup):
+    waiting_link = State()
 
 
 class CheckoutState(StatesGroup):
@@ -275,6 +281,44 @@ async def get_all_products(max_items=2000, batch_size=500):
         offset += batch_size
         await asyncio.sleep(0.3)
     return products[:max_items]
+
+
+def get_image_url(product):
+    images = product.get("images") or product.get("image") or product.get("photo")
+    url = None
+
+    if isinstance(images, list) and images:
+        first = images[0]
+        if isinstance(first, dict):
+            url = (
+                first.get("url")
+                or first.get("src")
+                or first.get("image")
+                or first.get("big")
+            )
+        else:
+            url = str(first)
+    elif isinstance(images, dict):
+        url = (
+            images.get("url")
+            or images.get("src")
+            or images.get("image")
+            or images.get("big")
+        )
+    elif isinstance(images, str):
+        url = images
+
+    if not url:
+        return None
+
+    if str(url).startswith("http"):
+        return str(url)
+
+    return urljoin(SITE_URL, str(url).lstrip("/"))
+
+
+def normalize_url(url):
+    return str(url or "").strip().rstrip("/").lower()
 
 
 def product_text(product):
@@ -526,6 +570,101 @@ async def checkout_confirm(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer()
+
+
+
+@dp.message(F.text == "/пост")
+async def manual_post_start(message: Message, state: FSMContext):
+    # Команда доступна только менеджеру, чей ID указан в Railway.
+    if MANAGER_CHAT_ID and str(message.from_user.id) != str(MANAGER_CHAT_ID):
+        await message.answer("⛔ Эта команда доступна только администратору.")
+        return
+
+    await state.clear()
+    await state.set_state(PostState.waiting_link)
+    await message.answer(
+        "Пришлите ссылку на нужный товар с сайта OKVEJ.\n\n"
+        "Например:\n"
+        "https://okvej.com.ua/ua/nazvanie-tovara/"
+    )
+
+
+@dp.message(PostState.waiting_link)
+async def manual_post_publish(message: Message, state: FSMContext):
+    link = (message.text or "").strip()
+
+    if not link.startswith("http"):
+        await message.answer("Пришлите полную ссылку на товар, начинающуюся с http.")
+        return
+
+    await message.answer("🔎 Ищу товар в каталоге...")
+
+    try:
+        products = await get_all_products()
+        target = normalize_url(link)
+        product = None
+
+        for item in products:
+            if normalize_url(product_link(item)) == target:
+                product = item
+                break
+
+        if not product:
+            await message.answer(
+                "❌ Товар по этой ссылке не найден в API Хорошоп.\n"
+                "Проверьте ссылку и попробуйте ещё раз."
+            )
+            return
+
+        title = localize(product.get("title"))
+        price = price_number(product)
+        image_url = get_image_url(product)
+
+        post_text = (
+            f"🍬 <b>{title}</b>\n\n"
+            f"💰 Цена: <b>{price:g} грн</b>\n\n"
+            f"🔗 Заказать:\n{product_link(product)}"
+        )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="🛒 Купить",
+                    url=product_link(product),
+                )],
+                [InlineKeyboardButton(
+                    text="💬 Менеджер",
+                    url=f"https://t.me/{MANAGER_USERNAME}",
+                )],
+                [InlineKeyboardButton(
+                    text="🤖 Открыть бота",
+                    url=BOT_URL,
+                )],
+            ]
+        )
+
+        if image_url:
+            await bot.send_photo(
+                CHANNEL_USERNAME,
+                photo=image_url,
+                caption=post_text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        else:
+            await bot.send_message(
+                CHANNEL_USERNAME,
+                post_text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+
+        await message.answer("✅ Товар опубликован в канале.")
+        await state.clear()
+
+    except Exception as e:
+        logging.exception("Manual product post error")
+        await message.answer(f"❌ Ошибка публикации: {e}")
 
 
 @dp.message(CommandStart())
