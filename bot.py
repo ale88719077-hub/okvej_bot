@@ -1,8 +1,12 @@
 import asyncio
 import logging
 import os
+import re
+import json
 from collections import defaultdict
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, unquote
+
+import aiohttp
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -12,6 +16,8 @@ from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
+
+from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
@@ -321,6 +327,165 @@ def normalize_url(url):
     return str(url or "").strip().rstrip("/").lower()
 
 
+def canonical_product_path(url):
+    """
+    Сравнивает ссылки независимо от домена, /ua/, /ru/, завершающего слэша
+    и параметров после знака ?.
+    """
+    parsed = urlparse(str(url or "").strip())
+    path = unquote(parsed.path).strip("/").lower()
+    parts = [part for part in path.split("/") if part]
+
+    if parts and parts[0] in {"ua", "ru", "uk"}:
+        parts = parts[1:]
+
+    return "/".join(parts)
+
+
+class ProductPageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.meta = {}
+        self.json_ld_parts = []
+        self._inside_json_ld = False
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+
+        if tag.lower() == "meta":
+            key = (
+                attributes.get("property")
+                or attributes.get("name")
+                or attributes.get("itemprop")
+            )
+            content = attributes.get("content")
+
+            if key and content:
+                self.meta[str(key).lower()] = content.strip()
+
+        if tag.lower() == "script":
+            script_type = str(attributes.get("type", "")).lower()
+            if "ld+json" in script_type:
+                self._inside_json_ld = True
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "script":
+            self._inside_json_ld = False
+
+    def handle_data(self, data):
+        if self._inside_json_ld:
+            self.json_ld_parts.append(data)
+
+
+def clean_page_title(title):
+    title = str(title or "").strip()
+
+    for separator in (" | OKVEJ", " — OKVEJ", " - OKVEJ"):
+        if separator.lower() in title.lower():
+            index = title.lower().find(separator.lower())
+            title = title[:index].strip()
+
+    return title
+
+
+def find_price_in_json(value):
+    if isinstance(value, dict):
+        if "price" in value:
+            price = value.get("price")
+            if isinstance(price, (str, int, float)):
+                return str(price)
+
+        for child in value.values():
+            result = find_price_in_json(child)
+            if result:
+                return result
+
+    elif isinstance(value, list):
+        for child in value:
+            result = find_price_in_json(child)
+            if result:
+                return result
+
+    return None
+
+
+async def load_product_from_page(link):
+    """
+    Запасной способ: читает название, фото и цену прямо со страницы товара.
+    Используется, если ссылка товара не совпала со ссылкой из API Хорошоп.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 Chrome/126 Safari/537.36"
+        )
+    }
+
+    timeout = aiohttp.ClientTimeout(total=25)
+
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.get(link, allow_redirects=True) as response:
+            if response.status >= 400:
+                raise RuntimeError(f"Страница товара вернула HTTP {response.status}")
+
+            html = await response.text()
+            final_link = str(response.url)
+
+    parser = ProductPageParser()
+    parser.feed(html)
+
+    title = clean_page_title(
+        parser.meta.get("og:title")
+        or parser.meta.get("twitter:title")
+        or parser.meta.get("title")
+    )
+
+    image_url = (
+        parser.meta.get("og:image")
+        or parser.meta.get("twitter:image")
+        or parser.meta.get("image")
+    )
+
+    price = (
+        parser.meta.get("product:price:amount")
+        or parser.meta.get("product:price")
+        or parser.meta.get("price")
+    )
+
+    if not price:
+        for raw_json in parser.json_ld_parts:
+            try:
+                json_data = json.loads(raw_json.strip())
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            price = find_price_in_json(json_data)
+            if price:
+                break
+
+    if not price:
+        price_match = re.search(
+            r'(?:"price"|itemprop=["\\\']price["\\\'])[^0-9]{0,50}([0-9]+(?:[.,][0-9]+)?)',
+            html,
+            flags=re.IGNORECASE,
+        )
+        if price_match:
+            price = price_match.group(1)
+
+    if image_url and not image_url.startswith("http"):
+        image_url = urljoin(final_link, image_url)
+
+    if not title:
+        raise RuntimeError("Не удалось прочитать название товара со страницы")
+
+    return {
+        "title": title,
+        "price": str(price or "").replace(",", ".").strip(),
+        "image_url": image_url,
+        "link": final_link,
+    }
+
+
 def product_text(product):
     title = localize(product.get("title"))
     price = price_number(product)
@@ -596,36 +761,49 @@ async def manual_post_publish(message: Message, state: FSMContext):
 
     try:
         products = await get_all_products()
-        target = normalize_url(link)
+        target_path = canonical_product_path(link)
         product = None
 
         for item in products:
-            if normalize_url(product_link(item)) == target:
+            if canonical_product_path(product_link(item)) == target_path:
                 product = item
                 break
 
-        if not product:
-            await message.answer(
-                "❌ Товар по этой ссылке не найден в API Хорошоп.\n"
-                "Проверьте ссылку и попробуйте ещё раз."
-            )
-            return
+        if product:
+            title = localize(product.get("title"))
+            price = price_number(product)
+            image_url = get_image_url(product)
+            final_link = product_link(product)
+            price_line = f"💰 Цена: <b>{price:g} грн</b>\n\n"
+        else:
+            # Если API возвращает другую языковую ссылку или другой slug,
+            # читаем данные непосредственно со страницы товара.
+            page_product = await load_product_from_page(link)
+            title = page_product["title"]
+            image_url = page_product["image_url"]
+            final_link = page_product["link"]
+            raw_price = page_product["price"]
 
-        title = localize(product.get("title"))
-        price = price_number(product)
-        image_url = get_image_url(product)
+            if raw_price:
+                try:
+                    formatted_price = f"{float(raw_price):g}"
+                except ValueError:
+                    formatted_price = raw_price
+                price_line = f"💰 Цена: <b>{formatted_price} грн</b>\n\n"
+            else:
+                price_line = "💰 Актуальная цена указана на сайте\n\n"
 
         post_text = (
             f"🍬 <b>{title}</b>\n\n"
-            f"💰 Цена: <b>{price:g} грн</b>\n\n"
-            f"🔗 Заказать:\n{product_link(product)}"
+            f"{price_line}"
+            f"🔗 Заказать:\n{final_link}"
         )
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(
                     text="🛒 Купить",
-                    url=product_link(product),
+                    url=final_link,
                 )],
                 [InlineKeyboardButton(
                     text="💬 Менеджер",
