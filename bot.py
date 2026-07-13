@@ -23,8 +23,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "5.0"
-BOT_BUILD = "2026-07-13"
+BOT_VERSION = "6.0"
+BOT_BUILD = "2026-07-13-category-fix"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -327,8 +327,61 @@ async def get_in_stock_products(force_refresh: bool = False):
     return available
 
 
+CATEGORY_SLUG_NAMES = {
+    "konfety-vesovye": "Цукерки вагові",
+    "konfety": "Цукерки",
+    "karamel-v-miahkoi-upakovke": "Карамель",
+    "karamel": "Карамель",
+    "nabory-podarochnykh-konfet": "Подарункові набори",
+    "podarochnye-nabory": "Подарункові набори",
+    "pechene-y-muchnye-yzdelyia": "Печиво та борошняні вироби",
+    "pechene": "Печиво",
+    "zefyr-y-marmelad": "Зефір та мармелад",
+    "zefir": "Зефір",
+    "marmelad": "Мармелад",
+    "shokolad": "Шоколад",
+    "vafli": "Вафлі",
+    "keksy": "Кекси",
+    "torty": "Торти",
+    "napitki": "Напої",
+    "orehi-i-suhofrukty": "Горіхи та сухофрукти",
+    "zhvachka": "Жувальна гумка",
+    "batonchiki": "Батончики",
+}
+
+
+def category_from_link(product):
+    """Визначає категорію за URL товару, якщо API не повернув category."""
+    link = product_link(product)
+    path = unquote(urlparse(link).path).strip("/")
+    parts = [part for part in path.split("/") if part]
+
+    if parts and parts[0] in ("ua", "uk", "ru"):
+        parts = parts[1:]
+
+    if not parts:
+        return None
+
+    slug = parts[0].lower()
+
+    if slug in CATEGORY_SLUG_NAMES:
+        return CATEGORY_SLUG_NAMES[slug]
+
+    # Для невідомих категорій робимо читабельну назву зі slug.
+    readable = slug.replace("-", " ").replace("_", " ").strip()
+    if not readable:
+        return None
+
+    return readable[:1].upper() + readable[1:]
+
+
 def category_name(product):
-    category = product.get("category") or product.get("categories")
+    category = (
+        product.get("category")
+        or product.get("categories")
+        or product.get("main_category")
+        or product.get("category_name")
+    )
 
     if isinstance(category, list):
         category = category[-1] if category else None
@@ -338,13 +391,17 @@ def category_name(product):
             title = localize(category.get(key)).strip()
             if title:
                 return title
+
         for key in ("ua", "uk", "ru"):
             title = str(category.get(key) or "").strip()
             if title:
                 return title
 
     title = localize(category).strip()
-    return title or "Інші товари"
+    if title:
+        return title
+
+    return category_from_link(product) or "Інші товари"
 
 
 def category_key(name: str) -> str:
@@ -1014,8 +1071,8 @@ async def version_handler(message: Message):
         "🤖 <b>OKVEJ Bot</b>\n\n"
         f"Версія: <b>{BOT_VERSION}</b>\n"
         f"Збірка: <b>{BOT_BUILD}</b>\n\n"
-        "Каталог працює через Horoshop API та показує "
-        "лише товари зі статусом «В наявності».",
+        "Каталог працює через Horoshop API, показує лише товари "
+        "зі статусом «В наявності» та визначає категорії за URL товарів.",
         parse_mode="HTML",
     )
 
