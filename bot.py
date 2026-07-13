@@ -263,22 +263,27 @@ def normalize_stock(value):
 
 def is_in_stock(product):
     """
-    В Horoshop поле presence является основным статусом наличия.
-
-    quantity у некоторых магазинов может приходить как 0 даже для товаров,
-    которые отмечены в админке как «В наличии», поэтому оно используется
-    только как запасной сигнал, если presence отсутствует.
+    Для OKVEJ основным статусом наличия является Horoshop presence.id:
+    1 — в наличии; остальные значения не показываются в каталоге.
     """
-    presence = normalize_stock(product.get("presence"))
-    if presence is not None:
-        return presence
+    presence = product.get("presence")
 
-    for field in ("available", "in_stock", "stock"):
-        signal = normalize_stock(product.get(field))
-        if signal is not None:
-            return signal
+    if isinstance(presence, dict):
+        presence_id = presence.get("id")
+        try:
+            return int(presence_id) == 1
+        except (TypeError, ValueError):
+            pass
 
-    for field in ("quantity", "count", "balance"):
+        normalized = normalize_stock(presence.get("value"))
+        if normalized is not None:
+            return normalized
+
+    normalized = normalize_stock(presence)
+    if normalized is not None:
+        return normalized
+
+    for field in ("available", "in_stock", "stock", "quantity", "count", "balance"):
         signal = normalize_stock(product.get(field))
         if signal is not None:
             return signal
@@ -964,95 +969,6 @@ async def my_id(message: Message):
         f"Ваш Telegram chat ID: <code>{message.chat.id}</code>",
         parse_mode="HTML",
     )
-
-
-@dp.message(Command("debug_stock"))
-async def debug_stock(message: Message):
-    """Перевіряє статистику наявності по всьому каталогу."""
-    loading = await message.answer("🔎 Перевіряю весь каталог Horoshop...")
-
-    try:
-        products = await get_all_products(max_items=2000, batch_size=500)
-
-        if not products:
-            await loading.edit_text(
-                "❌ API не повернув жодного товару.\n\n"
-                "Перевірте HOROSHOP_DOMAIN, HOROSHOP_LOGIN і HOROSHOP_PASSWORD "
-                "у Railway Variables."
-            )
-            return
-
-        in_stock = [p for p in products if is_in_stock(p)]
-        out_stock = [p for p in products if not is_in_stock(p)]
-
-        status_counts = {}
-        for product in products:
-            presence = product.get("presence")
-            if isinstance(presence, dict):
-                value = presence.get("value")
-                if isinstance(value, dict):
-                    label = (
-                        value.get("ua")
-                        or value.get("uk")
-                        or value.get("ru")
-                        or str(value)
-                    )
-                else:
-                    label = str(value)
-                presence_id = presence.get("id")
-                key = f"id={presence_id}: {label}"
-            else:
-                key = str(presence)
-
-            status_counts[key] = status_counts.get(key, 0) + 1
-
-        lines = [
-            "🔎 <b>Діагностика наявності</b>",
-            "",
-            f"Усього отримано: <b>{len(products)}</b>",
-            f"У наявності: <b>{len(in_stock)}</b>",
-            f"Немає в наявності: <b>{len(out_stock)}</b>",
-            "",
-            "<b>Статуси presence:</b>",
-        ]
-
-        for status, count in sorted(
-            status_counts.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        ):
-            lines.append(f"• {status} — {count}")
-
-        if in_stock:
-            sample = in_stock[0]
-            lines.extend([
-                "",
-                "<b>Перший товар у наявності:</b>",
-                localize(sample.get("title")) or "Без назви",
-                f"presence: <code>{json.dumps(sample.get('presence'), ensure_ascii=False, default=str)[:800]}</code>",
-                f"quantity: <code>{sample.get('quantity')}</code>",
-            ])
-        else:
-            lines.extend([
-                "",
-                "⚠️ API не повернув жодного товару зі статусом «В наявності».",
-                "Це вже не помилка фільтра: потрібно перевірити статуси товарів "
-                "у Хорошопі або параметри експорту API.",
-            ])
-
-        await loading.edit_text(
-            "\n".join(lines)[:3900],
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-
-    except Exception as error:
-        logging.exception("Stock debug error")
-        await loading.edit_text(
-            "❌ Помилка перевірки API:\n"
-            f"<code>{str(error)[:1000]}</code>",
-            parse_mode="HTML",
-        )
 
 
 @dp.message(F.text == "🚚 Доставка й оплата")
