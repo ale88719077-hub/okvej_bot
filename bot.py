@@ -262,20 +262,28 @@ def normalize_stock(value):
 
 
 def is_in_stock(product):
-    signals = [
-        normalize_stock(product.get("presence")),
-        normalize_stock(product.get("available")),
-        normalize_stock(product.get("in_stock")),
-        normalize_stock(product.get("stock")),
-        normalize_stock(product.get("quantity")),
-        normalize_stock(product.get("count")),
-        normalize_stock(product.get("balance")),
-    ]
-    # Любой явный ноль/нет наличия блокирует товар.
-    if False in signals:
-        return False
-    # Нужен хотя бы один положительный сигнал.
-    return True in signals
+    """
+    В Horoshop поле presence является основным статусом наличия.
+
+    quantity у некоторых магазинов может приходить как 0 даже для товаров,
+    которые отмечены в админке как «В наличии», поэтому оно используется
+    только как запасной сигнал, если presence отсутствует.
+    """
+    presence = normalize_stock(product.get("presence"))
+    if presence is not None:
+        return presence
+
+    for field in ("available", "in_stock", "stock"):
+        signal = normalize_stock(product.get(field))
+        if signal is not None:
+            return signal
+
+    for field in ("quantity", "count", "balance"):
+        signal = normalize_stock(product.get(field))
+        if signal is not None:
+            return signal
+
+    return False
 
 
 async def get_all_products(max_items=2000, batch_size=500):
