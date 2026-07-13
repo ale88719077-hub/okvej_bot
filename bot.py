@@ -23,8 +23,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "6.0"
-BOT_BUILD = "2026-07-13-category-fix"
+BOT_VERSION = "6.1"
+BOT_BUILD = "2026-07-13-category-pagination"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -416,15 +416,50 @@ def grouped_categories(products):
     return dict(sorted(groups.items(), key=lambda item: item[0].lower()))
 
 
-def categories_keyboard(products) -> InlineKeyboardMarkup:
+CATEGORY_PAGE_SIZE = 12
+
+
+def categories_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
+    groups = list(grouped_categories(products).items())
+    total = len(groups)
+    page_count = max(1, (total + CATEGORY_PAGE_SIZE - 1) // CATEGORY_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+
+    start = page * CATEGORY_PAGE_SIZE
+    page_items = groups[start:start + CATEGORY_PAGE_SIZE]
+
     rows = []
-    for name, items in grouped_categories(products).items():
+    for name, items in page_items:
         rows.append([
             InlineKeyboardButton(
                 text=f"🍬 {name[:44]} ({len(items)})",
                 callback_data=f"catalog_category:{category_key(name)}",
             )
         ])
+
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=f"categories_page:{page - 1}",
+            )
+        )
+    navigation.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{page_count}",
+            callback_data="catalog_noop",
+        )
+    )
+    if page + 1 < page_count:
+        navigation.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=f"categories_page:{page + 1}",
+            )
+        )
+
+    rows.append(navigation)
     rows.append([
         InlineKeyboardButton(
             text="🔄 Оновити каталог",
@@ -1118,13 +1153,37 @@ async def catalog(message: Message):
             f"📂 Категорій: <b>{len(groups)}</b>\n\n"
             "Оберіть категорію:",
             parse_mode="HTML",
-            reply_markup=categories_keyboard(products),
+            reply_markup=categories_keyboard(products, 0),
         )
-    except Exception:
+    except Exception as error:
         logging.exception("Catalog loading error")
         await loading.edit_text(
-            "❌ Не вдалося завантажити каталог. "
+            "❌ Не вдалося відкрити каталог. "
             "Спробуйте ще раз трохи пізніше."
+        )
+
+
+@dp.callback_query(F.data.startswith("categories_page:"))
+async def categories_page(callback: CallbackQuery):
+    try:
+        page = int(callback.data.split(":", 1)[1])
+        products = await get_in_stock_products()
+        groups = grouped_categories(products)
+
+        await callback.message.edit_text(
+            "🍬 <b>Каталог OKVEJ</b>\n\n"
+            f"✅ У наявності: <b>{len(products)}</b> товарів\n"
+            f"📂 Категорій: <b>{len(groups)}</b>\n\n"
+            "Оберіть категорію:",
+            parse_mode="HTML",
+            reply_markup=categories_keyboard(products, page),
+        )
+        await callback.answer()
+    except Exception:
+        logging.exception("Categories page error")
+        await callback.answer(
+            "Не вдалося відкрити сторінку категорій.",
+            show_alert=True,
         )
 
 
@@ -1145,7 +1204,7 @@ async def catalog_refresh(callback: CallbackQuery):
             f"📂 Категорій: <b>{len(groups)}</b>\n\n"
             "Каталог оновлено. Оберіть категорію:",
             parse_mode="HTML",
-            reply_markup=categories_keyboard(products),
+            reply_markup=categories_keyboard(products, 0),
         )
         await callback.answer("Каталог оновлено")
     except Exception:
@@ -1167,7 +1226,7 @@ async def catalog_categories(callback: CallbackQuery):
         f"📂 Категорій: <b>{len(groups)}</b>\n\n"
         "Оберіть категорію:",
         parse_mode="HTML",
-        reply_markup=categories_keyboard(products),
+        reply_markup=categories_keyboard(products, 0),
     )
     await callback.answer()
 
