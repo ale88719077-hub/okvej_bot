@@ -968,11 +968,11 @@ async def my_id(message: Message):
 
 @dp.message(Command("debug_stock"))
 async def debug_stock(message: Message):
-    """Показує реальні поля наявності першого товару з Horoshop API."""
-    loading = await message.answer("🔎 Перевіряю відповідь Horoshop API...")
+    """Перевіряє статистику наявності по всьому каталогу."""
+    loading = await message.answer("🔎 Перевіряю весь каталог Horoshop...")
 
     try:
-        products = await get_all_products(max_items=20, batch_size=20)
+        products = await get_all_products(max_items=2000, batch_size=500)
 
         if not products:
             await loading.edit_text(
@@ -982,49 +982,66 @@ async def debug_stock(message: Message):
             )
             return
 
-        product = products[0]
-        title = localize(product.get("title")) or "Без назви"
+        in_stock = [p for p in products if is_in_stock(p)]
+        out_stock = [p for p in products if not is_in_stock(p)]
 
-        stock_fields = {
-            "presence": product.get("presence"),
-            "available": product.get("available"),
-            "in_stock": product.get("in_stock"),
-            "stock": product.get("stock"),
-            "quantity": product.get("quantity"),
-            "count": product.get("count"),
-            "balance": product.get("balance"),
-        }
+        status_counts = {}
+        for product in products:
+            presence = product.get("presence")
+            if isinstance(presence, dict):
+                value = presence.get("value")
+                if isinstance(value, dict):
+                    label = (
+                        value.get("ua")
+                        or value.get("uk")
+                        or value.get("ru")
+                        or str(value)
+                    )
+                else:
+                    label = str(value)
+                presence_id = presence.get("id")
+                key = f"id={presence_id}: {label}"
+            else:
+                key = str(presence)
 
-        normalized = {
-            key: normalize_stock(value)
-            for key, value in stock_fields.items()
-        }
+            status_counts[key] = status_counts.get(key, 0) + 1
 
-        raw_json = json.dumps(
-            stock_fields,
-            ensure_ascii=False,
-            indent=2,
-            default=str,
-        )
-        normalized_json = json.dumps(
-            normalized,
-            ensure_ascii=False,
-            indent=2,
-            default=str,
-        )
+        lines = [
+            "🔎 <b>Діагностика наявності</b>",
+            "",
+            f"Усього отримано: <b>{len(products)}</b>",
+            f"У наявності: <b>{len(in_stock)}</b>",
+            f"Немає в наявності: <b>{len(out_stock)}</b>",
+            "",
+            "<b>Статуси presence:</b>",
+        ]
 
-        text = (
-            f"🍬 <b>{title}</b>\n\n"
-            f"<b>Результат is_in_stock:</b> "
-            f"<code>{is_in_stock(product)}</code>\n\n"
-            f"<b>Сирі поля наявності:</b>\n"
-            f"<pre>{raw_json[:2500]}</pre>\n"
-            f"<b>Після normalize_stock:</b>\n"
-            f"<pre>{normalized_json[:1200]}</pre>"
-        )
+        for status, count in sorted(
+            status_counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        ):
+            lines.append(f"• {status} — {count}")
+
+        if in_stock:
+            sample = in_stock[0]
+            lines.extend([
+                "",
+                "<b>Перший товар у наявності:</b>",
+                localize(sample.get("title")) or "Без назви",
+                f"presence: <code>{json.dumps(sample.get('presence'), ensure_ascii=False, default=str)[:800]}</code>",
+                f"quantity: <code>{sample.get('quantity')}</code>",
+            ])
+        else:
+            lines.extend([
+                "",
+                "⚠️ API не повернув жодного товару зі статусом «В наявності».",
+                "Це вже не помилка фільтра: потрібно перевірити статуси товарів "
+                "у Хорошопі або параметри експорту API.",
+            ])
 
         await loading.edit_text(
-            text,
+            "\n".join(lines)[:3900],
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
