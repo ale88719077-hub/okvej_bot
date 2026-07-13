@@ -23,8 +23,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "6.1"
-BOT_BUILD = "2026-07-13-category-pagination"
+BOT_VERSION = "6.2"
+BOT_BUILD = "2026-07-13-smart-categories"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -328,20 +328,20 @@ async def get_in_stock_products(force_refresh: bool = False):
 
 
 CATEGORY_SLUG_NAMES = {
-    "konfety-vesovye": "Цукерки вагові",
+    "konfety-vesovye": "Цукерки",
     "konfety": "Цукерки",
     "karamel-v-miahkoi-upakovke": "Карамель",
     "karamel": "Карамель",
     "nabory-podarochnykh-konfet": "Подарункові набори",
     "podarochnye-nabory": "Подарункові набори",
-    "pechene-y-muchnye-yzdelyia": "Печиво та борошняні вироби",
+    "pechene-y-muchnye-yzdelyia": "Печиво",
     "pechene": "Печиво",
     "zefyr-y-marmelad": "Зефір та мармелад",
-    "zefir": "Зефір",
-    "marmelad": "Мармелад",
+    "zefir": "Зефір та мармелад",
+    "marmelad": "Зефір та мармелад",
     "shokolad": "Шоколад",
     "vafli": "Вафлі",
-    "keksy": "Кекси",
+    "keksy": "Кекси та випічка",
     "torty": "Торти",
     "napitki": "Напої",
     "orehi-i-suhofrukty": "Горіхи та сухофрукти",
@@ -350,8 +350,75 @@ CATEGORY_SLUG_NAMES = {
 }
 
 
+TITLE_CATEGORY_RULES = [
+    ("Печиво", (
+        "печиво", "печенье", "крекер", "галет", "cookie", "cookies",
+        "biscuit", "biskvitne pechyvo",
+    )),
+    ("Вафлі", (
+        "вафл", "wafer", "wafers", "vafli",
+    )),
+    ("Кекси та випічка", (
+        "кекс", "мафін", "маффин", "рулет", "слойк", "булоч",
+        "випіч", "выпеч", "croissant", "круасан", "cake",
+    )),
+    ("Зефір та мармелад", (
+        "зефір", "зефир", "мармелад", "пастил", "jelly", "gummy",
+    )),
+    ("Шоколад", (
+        "шоколад", "chocolate", "shokolad",
+    )),
+    ("Карамель", (
+        "карамел", "льодяник", "леденц", "lollipop", "candy drops",
+    )),
+    ("Драже", (
+        "драже", "drazhe", "dragee",
+    )),
+    ("Батончики", (
+        "батончик", "batonchyk", "bar ", "bars ",
+    )),
+    ("Жувальна гумка", (
+        "жувальн", "жевательн", "жвач", "gum",
+    )),
+    ("Горіхи та сухофрукти", (
+        "горіх", "орех", "арахіс", "арахис", "фісташ", "фисташ",
+        "мигдал", "миндал", "курага", "родзин", "изюм", "сухофрукт",
+    )),
+    ("Напої", (
+        "напій", "напиток", "чай", "кава", "кофе", "cappuccino",
+        "какао", "drink",
+    )),
+    ("Подарункові набори", (
+        "подарунк", "подарочн", "набір", "набор", "gift",
+    )),
+    ("Цукерки", (
+        "цукерк", "конфет", "truffle", "трюфел", "праліне", "пралине",
+        "ірис", "ирис", "toffee", "fudge",
+    )),
+]
+
+
+def normalize_title_for_category(value: str) -> str:
+    value = unquote(str(value or "")).lower()
+    value = value.replace("-", " ").replace("_", " ")
+    return " ".join(value.split())
+
+
+def category_from_title(product):
+    title = normalize_title_for_category(localize(product.get("title")))
+
+    for category, keywords in TITLE_CATEGORY_RULES:
+        if any(keyword in title for keyword in keywords):
+            return category
+
+    return None
+
+
 def category_from_link(product):
-    """Визначає категорію за URL товару, якщо API не повернув category."""
+    """
+    Использует URL только если в нём действительно есть отдельный сегмент
+    категории. Один последний сегмент обычно является slug самого товара.
+    """
     link = product_link(product)
     path = unquote(urlparse(link).path).strip("/")
     parts = [part for part in path.split("/") if part]
@@ -359,20 +426,17 @@ def category_from_link(product):
     if parts and parts[0] in ("ua", "uk", "ru"):
         parts = parts[1:]
 
-    if not parts:
+    # Нужны минимум два сегмента: категория/товар.
+    if len(parts) < 2:
         return None
 
-    slug = parts[0].lower()
+    category_slug = parts[-2].lower()
 
-    if slug in CATEGORY_SLUG_NAMES:
-        return CATEGORY_SLUG_NAMES[slug]
+    if category_slug in CATEGORY_SLUG_NAMES:
+        return CATEGORY_SLUG_NAMES[category_slug]
 
-    # Для невідомих категорій робимо читабельну назву зі slug.
-    readable = slug.replace("-", " ").replace("_", " ").strip()
-    if not readable:
-        return None
-
-    return readable[:1].upper() + readable[1:]
+    # Не создаём отдельную категорию из неизвестного slug.
+    return None
 
 
 def category_name(product):
@@ -401,7 +465,11 @@ def category_name(product):
     if title:
         return title
 
-    return category_from_link(product) or "Інші товари"
+    return (
+        category_from_link(product)
+        or category_from_title(product)
+        or "Інші товари"
+    )
 
 
 def category_key(name: str) -> str:
@@ -1107,7 +1175,7 @@ async def version_handler(message: Message):
         f"Версія: <b>{BOT_VERSION}</b>\n"
         f"Збірка: <b>{BOT_BUILD}</b>\n\n"
         "Каталог працює через Horoshop API, показує лише товари "
-        "зі статусом «В наявності» та визначає категорії за URL товарів.",
+        "зі статусом «В наявності» та розподіляє товари за категоріями.",
         parse_mode="HTML",
     )
 
