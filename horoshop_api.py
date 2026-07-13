@@ -60,7 +60,10 @@ class HoroshopAPI:
                 "presence",
                 "link",
                 "images",
-                "article"
+                "article",
+                "quantity",
+                "stock",
+                "category"
             ]
         })
 
