@@ -958,6 +958,78 @@ async def my_id(message: Message):
     )
 
 
+@dp.message(Command("debug_stock"))
+async def debug_stock(message: Message):
+    """Показує реальні поля наявності першого товару з Horoshop API."""
+    loading = await message.answer("🔎 Перевіряю відповідь Horoshop API...")
+
+    try:
+        products = await get_all_products(max_items=20, batch_size=20)
+
+        if not products:
+            await loading.edit_text(
+                "❌ API не повернув жодного товару.\n\n"
+                "Перевірте HOROSHOP_DOMAIN, HOROSHOP_LOGIN і HOROSHOP_PASSWORD "
+                "у Railway Variables."
+            )
+            return
+
+        product = products[0]
+        title = localize(product.get("title")) or "Без назви"
+
+        stock_fields = {
+            "presence": product.get("presence"),
+            "available": product.get("available"),
+            "in_stock": product.get("in_stock"),
+            "stock": product.get("stock"),
+            "quantity": product.get("quantity"),
+            "count": product.get("count"),
+            "balance": product.get("balance"),
+        }
+
+        normalized = {
+            key: normalize_stock(value)
+            for key, value in stock_fields.items()
+        }
+
+        raw_json = json.dumps(
+            stock_fields,
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+        normalized_json = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+
+        text = (
+            f"🍬 <b>{title}</b>\n\n"
+            f"<b>Результат is_in_stock:</b> "
+            f"<code>{is_in_stock(product)}</code>\n\n"
+            f"<b>Сирі поля наявності:</b>\n"
+            f"<pre>{raw_json[:2500]}</pre>\n"
+            f"<b>Після normalize_stock:</b>\n"
+            f"<pre>{normalized_json[:1200]}</pre>"
+        )
+
+        await loading.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    except Exception as error:
+        logging.exception("Stock debug error")
+        await loading.edit_text(
+            "❌ Помилка перевірки API:\n"
+            f"<code>{str(error)[:1000]}</code>",
+            parse_mode="HTML",
+        )
+
+
 @dp.message(F.text == "🚚 Доставка й оплата")
 async def delivery(message: Message):
     await message.answer(
