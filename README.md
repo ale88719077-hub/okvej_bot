@@ -1,18 +1,40 @@
-# OKVEJ Telegram Bot
+# OKVEJ Telegram Bot v4
 
-Telegram bot for OKVEJ sweets shop.
+Полная папка проекта для загрузки через GitHub Desktop.
 
-## Railway variables
+## Что работает
 
-Add these variables in Railway:
+- каталог из Horoshop API;
+- только товары со статусом `presence.id == 1`;
+- категории с количеством товаров;
+- пагинация по 8 товаров;
+- карточки товаров;
+- поиск;
+- корзина;
+- оформление заказа;
+- команда `/пост` сохранена;
+- команда `/debug_stock` удалена;
+- `.DS_Store` исключён через `.gitignore`.
 
-- TELEGRAM_BOT_TOKEN
-- MANAGER_USERNAME
-- SITE_URL
-- CHANNEL_URL
+## Railway Variables
 
-## Start command
+- `TELEGRAM_BOT_TOKEN`
+- `HOROSHOP_DOMAIN`
+- `HOROSHOP_LOGIN`
+- `HOROSHOP_PASSWORD`
+- `MANAGER_USERNAME`
+- `MANAGER_CHAT_ID`
+- `CHANNEL_USERNAME`
 
-Railway will use Procfile:
+## Запуск
 
+```bash
+pip install -r requirements.txt
+python bot.py
+```
+
+Railway запускает:
+
+```text
 worker: python bot.py
+```

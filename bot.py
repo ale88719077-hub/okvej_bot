@@ -4,6 +4,7 @@ import os
 import re
 import json
 import time
+import hashlib
 from collections import defaultdict
 from urllib.parse import urljoin, urlparse, unquote
 
@@ -96,7 +97,7 @@ def product_link(product):
 
 def product_key(product):
     raw = str(product.get("id") or product.get("article") or product_link(product))
-    return str(abs(hash(raw)))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14]
 
 
 def price_number(product):
@@ -262,22 +263,16 @@ def normalize_stock(value):
 
 
 def is_in_stock(product):
-    """
-    Для OKVEJ основным статусом наличия является Horoshop presence.id:
-    1 — в наличии; остальные значения не показываются в каталоге.
-    """
+    """Для OKVEJ presence.id == 1 означает «В наявності»."""
     presence = product.get("presence")
 
     if isinstance(presence, dict):
-        presence_id = presence.get("id")
         try:
-            return int(presence_id) == 1
+            return int(presence.get("id")) == 1
         except (TypeError, ValueError):
-            pass
-
-        normalized = normalize_stock(presence.get("value"))
-        if normalized is not None:
-            return normalized
+            normalized = normalize_stock(presence.get("value"))
+            if normalized is not None:
+                return normalized
 
     normalized = normalize_stock(presence)
     if normalized is not None:
@@ -329,11 +324,67 @@ async def get_in_stock_products(force_refresh: bool = False):
     return available
 
 
-def catalog_page_keyboard(products, page: int) -> InlineKeyboardMarkup:
+def category_name(product):
+    category = product.get("category") or product.get("categories")
+
+    if isinstance(category, list):
+        category = category[-1] if category else None
+
+    if isinstance(category, dict):
+        for key in ("title", "name", "value"):
+            title = localize(category.get(key)).strip()
+            if title:
+                return title
+        for key in ("ua", "uk", "ru"):
+            title = str(category.get(key) or "").strip()
+            if title:
+                return title
+
+    title = localize(category).strip()
+    return title or "Інші товари"
+
+
+def category_key(name: str) -> str:
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
+
+
+def grouped_categories(products):
+    groups = {}
+    for product in products:
+        name = category_name(product)
+        groups.setdefault(name, []).append(product)
+    return dict(sorted(groups.items(), key=lambda item: item[0].lower()))
+
+
+def categories_keyboard(products) -> InlineKeyboardMarkup:
+    rows = []
+    for name, items in grouped_categories(products).items():
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🍬 {name[:44]} ({len(items)})",
+                callback_data=f"catalog_category:{category_key(name)}",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            text="🌐 Відкрити весь каталог на сайті",
+            url=SITE_URL,
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def find_category(products, key: str):
+    for name, items in grouped_categories(products).items():
+        if category_key(name) == key:
+            return name, items
+    return None, []
+
+
+def catalog_page_keyboard(products, category_id: str, page: int) -> InlineKeyboardMarkup:
     total = len(products)
     page_count = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
     page = max(0, min(page, page_count - 1))
-
     start = page * CATALOG_PAGE_SIZE
     page_items = products[start:start + CATALOG_PAGE_SIZE]
 
@@ -343,11 +394,10 @@ def catalog_page_keyboard(products, page: int) -> InlineKeyboardMarkup:
         product_cache[key] = product
         title = localize(product.get("title")).strip() or "Товар"
         price = price_number(product)
-        button_text = f"{title[:42]} — {price:g} грн"
         rows.append([
             InlineKeyboardButton(
-                text=button_text,
-                callback_data=f"catalog_product:{key}:{page}",
+                text=f"{title[:39]} — {price:g} грн",
+                callback_data=f"catalog_product:{key}:{category_id}:{page}",
             )
         ])
 
@@ -355,8 +405,8 @@ def catalog_page_keyboard(products, page: int) -> InlineKeyboardMarkup:
     if page > 0:
         navigation.append(
             InlineKeyboardButton(
-                text="⬅️ Назад",
-                callback_data=f"catalog_page:{page - 1}",
+                text="⬅️",
+                callback_data=f"catalog_page:{category_id}:{page - 1}",
             )
         )
     navigation.append(
@@ -368,37 +418,31 @@ def catalog_page_keyboard(products, page: int) -> InlineKeyboardMarkup:
     if page + 1 < page_count:
         navigation.append(
             InlineKeyboardButton(
-                text="Далі ➡️",
-                callback_data=f"catalog_page:{page + 1}",
+                text="➡️",
+                callback_data=f"catalog_page:{category_id}:{page + 1}",
             )
         )
 
     rows.append(navigation)
     rows.append([
         InlineKeyboardButton(
-            text="🌐 Відкрити весь каталог на сайті",
-            url=SITE_URL,
+            text="⬅️ До категорій",
+            callback_data="catalog_categories",
         )
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def catalog_page_text(products, page: int) -> str:
+def catalog_page_text(category_title: str, products, page: int) -> str:
     total = len(products)
     page_count = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
     page = max(0, min(page, page_count - 1))
     start = page * CATALOG_PAGE_SIZE + 1
     end = min((page + 1) * CATALOG_PAGE_SIZE, total)
 
-    if total == 0:
-        return (
-            "🍬 <b>Каталог OKVEJ</b>\n\n"
-            "Наразі не знайдено товарів у наявності."
-        )
-
     return (
-        "🍬 <b>Каталог OKVEJ</b>\n\n"
-        f"✅ У наявності: <b>{total}</b> товарів\n"
+        f"🍬 <b>{category_title}</b>\n\n"
+        f"✅ У наявності: <b>{total}</b>\n"
         f"Показано: <b>{start}–{end}</b>\n\n"
         "Оберіть товар:"
     )
@@ -984,16 +1028,21 @@ async def delivery(message: Message):
 
 @dp.message(F.text == "🍬 Каталог")
 async def catalog(message: Message):
-    loading = await message.answer("⏳ Завантажую товари в наявності...")
+    loading = await message.answer("⏳ Завантажую каталог...")
 
     try:
         products = await get_in_stock_products()
+        groups = grouped_categories(products)
+
         await loading.edit_text(
-            catalog_page_text(products, 0),
+            "🍬 <b>Каталог OKVEJ</b>\n\n"
+            f"✅ У наявності: <b>{len(products)}</b> товарів\n"
+            f"📂 Категорій: <b>{len(groups)}</b>\n\n"
+            "Оберіть категорію:",
             parse_mode="HTML",
-            reply_markup=catalog_page_keyboard(products, 0),
+            reply_markup=categories_keyboard(products),
         )
-    except Exception as error:
+    except Exception:
         logging.exception("Catalog loading error")
         await loading.edit_text(
             "❌ Не вдалося завантажити каталог. "
@@ -1001,15 +1050,56 @@ async def catalog(message: Message):
         )
 
 
+@dp.callback_query(F.data == "catalog_categories")
+async def catalog_categories(callback: CallbackQuery):
+    products = await get_in_stock_products()
+    groups = grouped_categories(products)
+
+    await callback.message.edit_text(
+        "🍬 <b>Каталог OKVEJ</b>\n\n"
+        f"✅ У наявності: <b>{len(products)}</b> товарів\n"
+        f"📂 Категорій: <b>{len(groups)}</b>\n\n"
+        "Оберіть категорію:",
+        parse_mode="HTML",
+        reply_markup=categories_keyboard(products),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("catalog_category:"))
+async def catalog_category(callback: CallbackQuery):
+    category_id = callback.data.split(":", 1)[1]
+    products = await get_in_stock_products()
+    title, category_products = find_category(products, category_id)
+
+    if not category_products:
+        await callback.answer("Категорію не знайдено.", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        catalog_page_text(title, category_products, 0),
+        parse_mode="HTML",
+        reply_markup=catalog_page_keyboard(category_products, category_id, 0),
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("catalog_page:"))
 async def catalog_page(callback: CallbackQuery):
     try:
-        page = int(callback.data.split(":", 1)[1])
+        _, category_id, page_text = callback.data.split(":", 2)
+        page = int(page_text)
         products = await get_in_stock_products()
+        title, category_products = find_category(products, category_id)
+
+        if not category_products:
+            await callback.answer("Категорію не знайдено.", show_alert=True)
+            return
+
         await callback.message.edit_text(
-            catalog_page_text(products, page),
+            catalog_page_text(title, category_products, page),
             parse_mode="HTML",
-            reply_markup=catalog_page_keyboard(products, page),
+            reply_markup=catalog_page_keyboard(category_products, category_id, page),
         )
         await callback.answer()
     except Exception:
@@ -1028,7 +1118,7 @@ async def catalog_noop(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("catalog_product:"))
 async def catalog_product(callback: CallbackQuery):
     try:
-        _, key, page_text = callback.data.split(":", 2)
+        _, key, category_id, page_text = callback.data.split(":", 3)
         product = product_cache.get(key)
 
         if not product:
@@ -1056,8 +1146,8 @@ async def catalog_product(callback: CallbackQuery):
                 url=product_link(product),
             )],
             [InlineKeyboardButton(
-                text="⬅️ Назад до каталогу",
-                callback_data=f"catalog_page:{page}",
+                text="⬅️ Назад до категорії",
+                callback_data=f"catalog_page:{category_id}:{page}",
             )],
         ])
 
