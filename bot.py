@@ -23,6 +23,9 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
+BOT_VERSION = "5.0"
+BOT_BUILD = "2026-07-13"
+
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -365,6 +368,12 @@ def categories_keyboard(products) -> InlineKeyboardMarkup:
                 callback_data=f"catalog_category:{category_key(name)}",
             )
         ])
+    rows.append([
+        InlineKeyboardButton(
+            text="🔄 Оновити каталог",
+            callback_data="catalog_refresh",
+        )
+    ])
     rows.append([
         InlineKeyboardButton(
             text="🌐 Відкрити весь каталог на сайті",
@@ -999,6 +1008,18 @@ async def manual_post_publish(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка публикации: {e}")
 
 
+@dp.message(Command("version"))
+async def version_handler(message: Message):
+    await message.answer(
+        "🤖 <b>OKVEJ Bot</b>\n\n"
+        f"Версія: <b>{BOT_VERSION}</b>\n"
+        f"Збірка: <b>{BOT_BUILD}</b>\n\n"
+        "Каталог працює через Horoshop API та показує "
+        "лише товари зі статусом «В наявності».",
+        parse_mode="HTML",
+    )
+
+
 @dp.message(CommandStart())
 async def start(message: Message):
 
@@ -1047,6 +1068,34 @@ async def catalog(message: Message):
         await loading.edit_text(
             "❌ Не вдалося завантажити каталог. "
             "Спробуйте ще раз трохи пізніше."
+        )
+
+
+@dp.callback_query(F.data == "catalog_refresh")
+async def catalog_refresh(callback: CallbackQuery):
+    global catalog_products_cache, catalog_cache_until
+
+    catalog_products_cache = []
+    catalog_cache_until = 0.0
+
+    try:
+        products = await get_in_stock_products(force_refresh=True)
+        groups = grouped_categories(products)
+
+        await callback.message.edit_text(
+            "🍬 <b>Каталог OKVEJ</b>\n\n"
+            f"✅ У наявності: <b>{len(products)}</b> товарів\n"
+            f"📂 Категорій: <b>{len(groups)}</b>\n\n"
+            "Каталог оновлено. Оберіть категорію:",
+            parse_mode="HTML",
+            reply_markup=categories_keyboard(products),
+        )
+        await callback.answer("Каталог оновлено")
+    except Exception:
+        logging.exception("Catalog refresh error")
+        await callback.answer(
+            "Не вдалося оновити каталог.",
+            show_alert=True,
         )
 
 
