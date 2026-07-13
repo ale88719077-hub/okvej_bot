@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import json
+import time
 from collections import defaultdict
 from urllib.parse import urljoin, urlparse, unquote
 
@@ -45,6 +46,11 @@ shop = HoroshopAPI(
 # Корзины хранятся в памяти. После перезапуска Railway они очищаются.
 user_carts = defaultdict(dict)
 product_cache = {}
+catalog_products_cache = []
+catalog_cache_until = 0.0
+
+CATALOG_PAGE_SIZE = 8
+CATALOG_CACHE_SECONDS = 600
 
 
 class SearchState(StatesGroup):
@@ -287,6 +293,102 @@ async def get_all_products(max_items=2000, batch_size=500):
         offset += batch_size
         await asyncio.sleep(0.3)
     return products[:max_items]
+
+
+async def get_in_stock_products(force_refresh: bool = False):
+    """Завантажує та кешує лише товари, які є в наявності."""
+    global catalog_products_cache, catalog_cache_until
+
+    now = time.time()
+    if (
+        not force_refresh
+        and catalog_products_cache
+        and now < catalog_cache_until
+    ):
+        return catalog_products_cache
+
+    products = await get_all_products()
+    available = [product for product in products if is_in_stock(product)]
+    available.sort(key=lambda item: localize(item.get("title")).lower())
+
+    catalog_products_cache = available
+    catalog_cache_until = now + CATALOG_CACHE_SECONDS
+    return available
+
+
+def catalog_page_keyboard(products, page: int) -> InlineKeyboardMarkup:
+    total = len(products)
+    page_count = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+
+    start = page * CATALOG_PAGE_SIZE
+    page_items = products[start:start + CATALOG_PAGE_SIZE]
+
+    rows = []
+    for product in page_items:
+        key = product_key(product)
+        product_cache[key] = product
+        title = localize(product.get("title")).strip() or "Товар"
+        price = price_number(product)
+        button_text = f"{title[:42]} — {price:g} грн"
+        rows.append([
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"catalog_product:{key}:{page}",
+            )
+        ])
+
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"catalog_page:{page - 1}",
+            )
+        )
+    navigation.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{page_count}",
+            callback_data="catalog_noop",
+        )
+    )
+    if page + 1 < page_count:
+        navigation.append(
+            InlineKeyboardButton(
+                text="Далі ➡️",
+                callback_data=f"catalog_page:{page + 1}",
+            )
+        )
+
+    rows.append(navigation)
+    rows.append([
+        InlineKeyboardButton(
+            text="🌐 Відкрити весь каталог на сайті",
+            url=SITE_URL,
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def catalog_page_text(products, page: int) -> str:
+    total = len(products)
+    page_count = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * CATALOG_PAGE_SIZE + 1
+    end = min((page + 1) * CATALOG_PAGE_SIZE, total)
+
+    if total == 0:
+        return (
+            "🍬 <b>Каталог OKVEJ</b>\n\n"
+            "Наразі не знайдено товарів у наявності."
+        )
+
+    return (
+        "🍬 <b>Каталог OKVEJ</b>\n\n"
+        f"✅ У наявності: <b>{total}</b> товарів\n"
+        f"Показано: <b>{start}–{end}</b>\n\n"
+        "Оберіть товар:"
+    )
 
 
 def get_image_url(product):
@@ -869,18 +971,105 @@ async def delivery(message: Message):
 
 @dp.message(F.text == "🍬 Каталог")
 async def catalog(message: Message):
-    await message.answer(
-        "🍬 Каталог OKVEJ",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🍬 Цукерки вагові", url="https://okvej.com.ua/ua/konfety-vesovye/")],
-            [InlineKeyboardButton(text="🍭 Карамель", url="https://okvej.com.ua/ua/karamel-v-miahkoi-upakovke/")],
-            [InlineKeyboardButton(text="🎁 Подарунки", url="https://okvej.com.ua/ua/nabory-podarochnykh-konfet/")],
-            [InlineKeyboardButton(text="🍪 Печиво", url="https://okvej.com.ua/ua/pechene-y-muchnye-yzdelyia/")],
-            [InlineKeyboardButton(text="☁️ Зефір та мармелад", url="https://okvej.com.ua/ua/zefyr-y-marmelad/")],
-            [InlineKeyboardButton(text="🍫 Шоколад", url="https://okvej.com.ua/ua/shokolad/")],
-            [InlineKeyboardButton(text="🚚 Доставка й оплата", url="https://okvej.com.ua/ua/dostavka-i-oplata/")],
-        ]),
-    )
+    loading = await message.answer("⏳ Завантажую товари в наявності...")
+
+    try:
+        products = await get_in_stock_products()
+        await loading.edit_text(
+            catalog_page_text(products, 0),
+            parse_mode="HTML",
+            reply_markup=catalog_page_keyboard(products, 0),
+        )
+    except Exception as error:
+        logging.exception("Catalog loading error")
+        await loading.edit_text(
+            "❌ Не вдалося завантажити каталог. "
+            "Спробуйте ще раз трохи пізніше."
+        )
+
+
+@dp.callback_query(F.data.startswith("catalog_page:"))
+async def catalog_page(callback: CallbackQuery):
+    try:
+        page = int(callback.data.split(":", 1)[1])
+        products = await get_in_stock_products()
+        await callback.message.edit_text(
+            catalog_page_text(products, page),
+            parse_mode="HTML",
+            reply_markup=catalog_page_keyboard(products, page),
+        )
+        await callback.answer()
+    except Exception:
+        logging.exception("Catalog page error")
+        await callback.answer(
+            "Не вдалося відкрити сторінку каталогу.",
+            show_alert=True,
+        )
+
+
+@dp.callback_query(F.data == "catalog_noop")
+async def catalog_noop(callback: CallbackQuery):
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("catalog_product:"))
+async def catalog_product(callback: CallbackQuery):
+    try:
+        _, key, page_text = callback.data.split(":", 2)
+        product = product_cache.get(key)
+
+        if not product:
+            products = await get_in_stock_products()
+            product = next(
+                (item for item in products if product_key(item) == key),
+                None,
+            )
+
+        if not product or not is_in_stock(product):
+            await callback.answer(
+                "Цього товару вже немає в наявності.",
+                show_alert=True,
+            )
+            return
+
+        page = int(page_text)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="➕ Додати в кошик",
+                callback_data=f"add:{key}",
+            )],
+            [InlineKeyboardButton(
+                text="🛒 Купити на сайті",
+                url=product_link(product),
+            )],
+            [InlineKeyboardButton(
+                text="⬅️ Назад до каталогу",
+                callback_data=f"catalog_page:{page}",
+            )],
+        ])
+
+        image_url = get_image_url(product)
+        if image_url:
+            await callback.message.answer_photo(
+                photo=image_url,
+                caption=product_text(product),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        else:
+            await callback.message.answer(
+                product_text(product),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+
+        await callback.answer()
+    except Exception:
+        logging.exception("Catalog product error")
+        await callback.answer(
+            "Не вдалося відкрити товар.",
+            show_alert=True,
+        )
 
 
 @dp.message(F.text == "🔍 Пошук товару")
@@ -893,10 +1082,10 @@ async def search_start(message: Message, state: FSMContext):
 async def search_products(message: Message, state: FSMContext):
     query = (message.text or "").strip().lower()
     try:
-        products = await get_all_products()
+        products = await get_in_stock_products()
         results = [
             p for p in products
-            if is_in_stock(p) and query in localize(p.get("title")).lower()
+            if query in localize(p.get("title")).lower()
         ]
         if not results:
             await message.answer("😔 Нічого не знайдено в наявності.")
@@ -935,6 +1124,8 @@ async def channel(message: Message):
 
 
 async def main():
+    logging.info("Starting OKVEJ bot")
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
