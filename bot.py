@@ -23,8 +23,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "6.2"
-BOT_BUILD = "2026-07-13-smart-categories"
+BOT_VERSION = "6.3"
+BOT_BUILD = "2026-07-13-category-order-ui"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -476,12 +476,43 @@ def category_key(name: str) -> str:
     return hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
 
 
+CATEGORY_PRIORITY = [
+    "Цукерки",
+    "Подарункові набори",
+    "Печиво",
+    "Карамель",
+    "Шоколад",
+    "Зефір та мармелад",
+    "Кекси та випічка",
+    "Вафлі",
+    "Драже",
+    "Жувальна гумка",
+    "Горіхи та сухофрукти",
+    "Напої",
+    "Батончики",
+    "Інші товари",
+]
+
+
+def category_sort_key(name: str):
+    try:
+        return (0, CATEGORY_PRIORITY.index(name))
+    except ValueError:
+        return (1, name.lower())
+
+
 def grouped_categories(products):
     groups = {}
     for product in products:
         name = category_name(product)
         groups.setdefault(name, []).append(product)
-    return dict(sorted(groups.items(), key=lambda item: item[0].lower()))
+
+    return dict(
+        sorted(
+            groups.items(),
+            key=lambda item: category_sort_key(item[0]),
+        )
+    )
 
 
 CATEGORY_PAGE_SIZE = 12
@@ -497,10 +528,10 @@ def categories_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
     page_items = groups[start:start + CATEGORY_PAGE_SIZE]
 
     rows = []
-    for name, items in page_items:
+    for index, (name, items) in enumerate(page_items, start=start + 1):
         rows.append([
             InlineKeyboardButton(
-                text=f"🍬 {name[:44]} ({len(items)})",
+                text=f"{index}) {name[:40]} ({len(items)})",
                 callback_data=f"catalog_category:{category_key(name)}",
             )
         ])
@@ -509,7 +540,7 @@ def categories_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
     if page > 0:
         navigation.append(
             InlineKeyboardButton(
-                text="⬅️",
+                text="⬅️ Попередня",
                 callback_data=f"categories_page:{page - 1}",
             )
         )
@@ -522,7 +553,7 @@ def categories_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
     if page + 1 < page_count:
         navigation.append(
             InlineKeyboardButton(
-                text="➡️",
+                text="Наступна ➡️",
                 callback_data=f"categories_page:{page + 1}",
             )
         )
@@ -574,7 +605,7 @@ def catalog_page_keyboard(products, category_id: str, page: int) -> InlineKeyboa
     if page > 0:
         navigation.append(
             InlineKeyboardButton(
-                text="⬅️",
+                text="⬅️ Попередня",
                 callback_data=f"catalog_page:{category_id}:{page - 1}",
             )
         )
@@ -587,7 +618,7 @@ def catalog_page_keyboard(products, category_id: str, page: int) -> InlineKeyboa
     if page + 1 < page_count:
         navigation.append(
             InlineKeyboardButton(
-                text="➡️",
+                text="Наступна ➡️",
                 callback_data=f"catalog_page:{category_id}:{page + 1}",
             )
         )
@@ -612,6 +643,7 @@ def catalog_page_text(category_title: str, products, page: int) -> str:
     return (
         f"🍬 <b>{category_title}</b>\n\n"
         f"✅ У наявності: <b>{total}</b>\n"
+        f"📄 Сторінка: <b>{page + 1} із {page_count}</b>\n"
         f"Показано: <b>{start}–{end}</b>\n\n"
         "Оберіть товар:"
     )
