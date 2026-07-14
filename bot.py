@@ -7,6 +7,7 @@ import time
 import hashlib
 import html
 from collections import defaultdict
+from pathlib import Path
 from urllib.parse import urljoin, urlparse, unquote
 
 import aiohttp
@@ -24,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "11.7"
-BOT_BUILD = "2026-07-14-latest-arrivals"
+BOT_VERSION = "12.0"
+BOT_BUILD = "2026-07-14-manual-new-products-first-word-categories"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -38,6 +39,13 @@ CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@okvej")
 BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
+ADMIN_USER_ID = (os.getenv("ADMIN_USER_ID") or MANAGER_CHAT_ID or "").strip()
+
+MANUAL_NEW_PRODUCTS_PATH = Path(
+    os.getenv("MANUAL_NEW_PRODUCTS_PATH", "/data/manual_new_products.json")
+)
+if not MANUAL_NEW_PRODUCTS_PATH.parent.exists():
+    MANUAL_NEW_PRODUCTS_PATH = Path("manual_new_products.json")
 logging.info("MANAGER_CHAT_ID configured: %s", bool(MANAGER_CHAT_ID))
 
 bot = Bot(token=TOKEN)
@@ -84,7 +92,7 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🔍 Пошук товару"),
         ],
         [
-            KeyboardButton(text="🆕 Останні надходження"),
+            KeyboardButton(text="🆕 Новинки"),
             KeyboardButton(text="❤️ Обране"),
         ],
         [
@@ -124,6 +132,72 @@ def product_key(product):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14]
 
 
+def is_admin(user_id):
+    return bool(ADMIN_USER_ID) and str(user_id) == str(ADMIN_USER_ID)
+
+
+def load_manual_new_articles():
+    try:
+        if MANUAL_NEW_PRODUCTS_PATH.exists():
+            data = json.loads(
+                MANUAL_NEW_PRODUCTS_PATH.read_text(encoding="utf-8")
+            )
+            return {
+                str(article).strip()
+                for article in data
+                if str(article).strip()
+            }
+    except Exception:
+        logging.exception("Failed to load manual new products")
+    return set()
+
+
+def save_manual_new_articles(articles):
+    try:
+        MANUAL_NEW_PRODUCTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MANUAL_NEW_PRODUCTS_PATH.write_text(
+            json.dumps(
+                sorted(articles),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        logging.exception("Failed to save manual new products")
+        return False
+
+
+manual_new_articles = load_manual_new_articles()
+
+
+def product_article(product):
+    return str(product.get("article") or "").strip()
+
+
+def admin_new_button(product, user_id):
+    if not is_admin(user_id):
+        return None
+
+    article = product_article(product)
+    if not article:
+        return None
+
+    key = product_key(product)
+    if article in manual_new_articles:
+        return InlineKeyboardButton(
+            text="❌ Прибрати з новинок",
+            callback_data=f"admin_new_remove:{key}",
+        )
+
+    return InlineKeyboardButton(
+        text="🆕 Додати в новинки",
+        callback_data=f"admin_new_add:{key}",
+    )
+
+
+
 def price_number(product):
     value = product.get("price") or product.get("cost") or 0
     if isinstance(value, dict):
@@ -134,82 +208,107 @@ def price_number(product):
         return 0.0
 
 
-LATEST_PRODUCTS_LIMIT = 30
-LATEST_PRODUCTS_PAGE_SIZE = 8
+MANUAL_NEW_PAGE_SIZE = 8
 
 
-def latest_arrivals(products):
-    """
-    Horoshop API не повертає дату створення товару.
-    Тому показуємо останні товари у порядку відповіді API.
-    """
-    return list(reversed(products))[:LATEST_PRODUCTS_LIMIT]
+def manual_new_products(products):
+    by_article = {
+        product_article(product): product
+        for product in products
+        if product_article(product)
+    }
+    return [
+        by_article[article]
+        for article in manual_new_articles
+        if article in by_article and is_in_stock(by_article[article])
+    ]
 
 
-def latest_arrivals_keyboard(products, page=0):
+def manual_new_keyboard(products, page=0):
     page_count = max(
         1,
-        (len(products) + LATEST_PRODUCTS_PAGE_SIZE - 1)
-        // LATEST_PRODUCTS_PAGE_SIZE,
+        (len(products) + MANUAL_NEW_PAGE_SIZE - 1) // MANUAL_NEW_PAGE_SIZE,
     )
     page = max(0, min(page, page_count - 1))
-
-    start = page * LATEST_PRODUCTS_PAGE_SIZE
-    page_items = products[start:start + LATEST_PRODUCTS_PAGE_SIZE]
+    start = page * MANUAL_NEW_PAGE_SIZE
+    page_items = products[start:start + MANUAL_NEW_PAGE_SIZE]
 
     rows = []
-
     for product in page_items:
         key = product_key(product)
         product_cache[key] = product
         title = clean_product_title(localize(product.get("title")))
         price = price_number(product)
-
         rows.append([
             InlineKeyboardButton(
                 text=f"🆕 {title[:36]} — {price:g} грн",
-                callback_data=f"latest_product:{key}:{page}",
+                callback_data=f"manual_new_product:{key}:{page}",
             )
         ])
 
     navigation = []
-
     if page > 0:
         navigation.append(
             InlineKeyboardButton(
                 text="⬅️ Попередня",
-                callback_data=f"latest_page:{page - 1}",
+                callback_data=f"manual_new_page:{page - 1}",
             )
         )
-
     navigation.append(
         InlineKeyboardButton(
             text=f"Сторінка {page + 1}/{page_count}",
             callback_data="catalog_noop",
         )
     )
-
     if page + 1 < page_count:
         navigation.append(
             InlineKeyboardButton(
                 text="Наступна ➡️",
-                callback_data=f"latest_page:{page + 1}",
+                callback_data=f"manual_new_page:{page + 1}",
             )
         )
 
     rows.append(navigation)
     rows.append([
         InlineKeyboardButton(
-            text="🔄 Оновити список",
-            callback_data="latest_refresh",
-        )
-    ])
-    rows.append([
-        InlineKeyboardButton(
             text="🍬 До каталогу",
             callback_data="catalog_categories",
         )
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def card_keyboard(product, user_id, back_button=None):
+    key = product_key(product)
+    product_cache[key] = product
+    rows = [
+        [InlineKeyboardButton(
+            text="🛒 Додати в кошик",
+            callback_data=f"add:{key}",
+        )],
+        [InlineKeyboardButton(
+            text="❤️ В обране",
+            callback_data=f"favorite_add:{key}",
+        )],
+    ]
+
+    admin_button = admin_new_button(product, user_id)
+    if admin_button:
+        rows.append([admin_button])
+
+    rows.extend([
+        [InlineKeyboardButton(
+            text="🌐 Відкрити на сайті",
+            url=product_link(product),
+        )],
+        [InlineKeyboardButton(
+            text="🛍 Перейти до кошика",
+            callback_data="open_cart",
+        )],
+    ])
+
+    if back_button:
+        rows.append([back_button])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -505,14 +604,55 @@ def normalize_title_for_category(value: str) -> str:
     return " ".join(value.split())
 
 
+FIRST_WORD_CATEGORY_RULES = {
+    "цукерки": "Цукерки",
+    "конфеты": "Цукерки",
+    "конфета": "Цукерки",
+    "шоколад": "Шоколад",
+    "печиво": "Печиво",
+    "печенье": "Печиво",
+    "карамель": "Карамель",
+    "зефір": "Зефір та мармелад",
+    "зефир": "Зефір та мармелад",
+    "мармелад": "Зефір та мармелад",
+    "вафлі": "Вафлі",
+    "вафли": "Вафлі",
+    "драже": "Драже",
+    "жувальна": "Жувальна гумка",
+    "жевательная": "Жувальна гумка",
+    "горіх": "Горіхи та сухофрукти",
+    "горіхи": "Горіхи та сухофрукти",
+    "орех": "Горіхи та сухофрукти",
+    "орехи": "Горіхи та сухофрукти",
+    "сухофрукти": "Горіхи та сухофрукти",
+    "сухофрукты": "Горіхи та сухофрукти",
+    "напій": "Напої",
+    "напої": "Напої",
+    "напиток": "Напої",
+    "напитки": "Напої",
+    "батончик": "Батончики",
+    "батончики": "Батончики",
+    "кекс": "Кекси та випічка",
+    "кекси": "Кекси та випічка",
+    "торт": "Кекси та випічка",
+    "ирис": "Карамель",
+    "ірис": "Карамель",
+    "набір": "Подарункові набори",
+    "набор": "Подарункові набори",
+    "подарунковий": "Подарункові набори",
+    "подарочный": "Подарункові набори",
+}
+
+
 def category_from_title(product):
-    title = normalize_title_for_category(localize(product.get("title")))
+    title = clean_product_title(localize(product.get("title")))
+    normalized = normalize_title_for_category(title).strip()
 
-    for category, keywords in TITLE_CATEGORY_RULES:
-        if any(keyword in title for keyword in keywords):
-            return category
+    if not normalized:
+        return None
 
-    return None
+    first_word = normalized.split()[0].strip(" \"\'«»()[]{}.,:;_-")
+    return FIRST_WORD_CATEGORY_RULES.get(first_word)
 
 
 def category_from_link(product):
@@ -541,6 +681,11 @@ def category_from_link(product):
 
 
 def category_name(product):
+    # Главный принцип: категория определяется по первому слову названия.
+    title_category = category_from_title(product)
+    if title_category:
+        return title_category
+
     category = (
         product.get("category")
         or product.get("categories")
@@ -557,20 +702,7 @@ def category_name(product):
             if title:
                 return title
 
-        for key in ("ua", "uk", "ru"):
-            title = str(category.get(key) or "").strip()
-            if title:
-                return title
-
-    title = localize(category).strip()
-    if title:
-        return title
-
-    return (
-        category_from_link(product)
-        or category_from_title(product)
-        or "Інші товари"
-    )
+    return category_from_link(product) or "Інші товари"
 
 
 def category_key(name: str) -> str:
@@ -1018,15 +1150,8 @@ def product_text(product):
     return "\n".join(lines)
 
 
-def product_keyboard(product):
-    key = product_key(product)
-    product_cache[key] = product
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 Додати в кошик", callback_data=f"add:{key}")],
-        [InlineKeyboardButton(text="❤️ В обране", callback_data=f"favorite_add:{key}")],
-        [InlineKeyboardButton(text="🌐 Відкрити на сайті", url=product_link(product))],
-        [InlineKeyboardButton(text="🛍 Перейти до кошика", callback_data="open_cart")],
-    ])
+def product_keyboard(product, user_id=None):
+    return card_keyboard(product, user_id)
 
 
 def cart_view(user_id):
@@ -1760,28 +1885,14 @@ async def catalog_product(callback: CallbackQuery):
         recent.insert(0, key)
         del recent[10:]
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="🛒 Додати в кошик",
-                callback_data=f"add:{key}",
-            )],
-            [InlineKeyboardButton(
-                text="❤️ В обране",
-                callback_data=f"favorite_add:{key}",
-            )],
-            [InlineKeyboardButton(
-                text="🌐 Відкрити на сайті",
-                url=product_link(product),
-            )],
-            [InlineKeyboardButton(
-                text="🛍 Перейти до кошика",
-                callback_data="open_cart",
-            )],
-            [InlineKeyboardButton(
+        keyboard = card_keyboard(
+            product,
+            callback.from_user.id,
+            InlineKeyboardButton(
                 text="⬅️ Назад до категорії",
                 callback_data=f"catalog_page:{category_id}:{page}",
-            )],
-        ])
+            ),
+        )
 
         image_url = get_image_url(product)
         if image_url:
@@ -2175,7 +2286,7 @@ async def search_product(callback: CallbackQuery):
         photo=get_image_url(product),
         caption=product_text(product),
         parse_mode="HTML",
-        reply_markup=product_keyboard(product),
+        reply_markup=product_keyboard(product, callback.from_user.id),
     )
     await callback.answer()
 
@@ -2241,133 +2352,76 @@ async def recent_product(callback: CallbackQuery):
             photo=image_url,
             caption=product_text(product),
             parse_mode="HTML",
-            reply_markup=product_keyboard(product),
+            reply_markup=product_keyboard(product, callback.from_user.id),
         )
     else:
         await callback.message.answer(
             product_text(product),
             parse_mode="HTML",
-            reply_markup=product_keyboard(product),
+            reply_markup=product_keyboard(product, callback.from_user.id),
         )
 
     await callback.answer()
 
 
 @dp.message(F.text == "🆕 Новинки")
-async def old_new_products_button(message: Message):
-    await latest_arrivals_menu(message)
+async def manual_new_products_menu(message: Message):
+    products = await get_in_stock_products()
+    items = manual_new_products(products)
 
-
-@dp.message(F.text == "🆕 Останні надходження")
-async def latest_arrivals_menu(message: Message):
-    try:
-        products = await get_in_stock_products()
-        items = latest_arrivals(products)
-
-        if not items:
-            await message.answer(
-                "🆕 Нових надходжень зараз не знайдено."
-            )
-            return
-
+    if not items:
         await message.answer(
-            "🆕 <b>Останні надходження OKVEJ</b>\n\n"
-            f"Показуємо останні <b>{len(items)}</b> товарів "
-            "у порядку Horoshop API.",
+            "🆕 <b>Новинки поки не вибрані</b>\n\n"
+            "Адміністратор може додати товар у новинки "
+            "кнопкою під карткою товару.",
             parse_mode="HTML",
-            reply_markup=latest_arrivals_keyboard(items, 0),
         )
+        return
 
-    except Exception:
-        logging.exception("Latest arrivals menu error")
-        await message.answer(
-            "❌ Не вдалося завантажити останні надходження."
-        )
+    await message.answer(
+        "🆕 <b>Новинки OKVEJ</b>\n\n"
+        f"Вибрано товарів: <b>{len(items)}</b>",
+        parse_mode="HTML",
+        reply_markup=manual_new_keyboard(items, 0),
+    )
 
 
-@dp.callback_query(F.data.startswith("latest_page:"))
-async def latest_arrivals_page(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("manual_new_page:"))
+async def manual_new_page(callback: CallbackQuery):
     page = int(callback.data.split(":", 1)[1])
     products = await get_in_stock_products()
-    items = latest_arrivals(products)
-
+    items = manual_new_products(products)
     await callback.message.edit_reply_markup(
-        reply_markup=latest_arrivals_keyboard(items, page),
+        reply_markup=manual_new_keyboard(items, page),
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data == "latest_refresh")
-async def latest_arrivals_refresh(callback: CallbackQuery):
-    try:
-        products = await get_in_stock_products(force_refresh=True)
-        items = latest_arrivals(products)
-
-        await callback.message.edit_text(
-            "🆕 <b>Останні надходження OKVEJ</b>\n\n"
-            f"Показуємо останні <b>{len(items)}</b> товарів "
-            "у порядку Horoshop API.",
-            parse_mode="HTML",
-            reply_markup=latest_arrivals_keyboard(items, 0),
-        )
-        await callback.answer("Список оновлено")
-
-    except Exception:
-        logging.exception("Latest arrivals refresh error")
-        await callback.answer(
-            "Не вдалося оновити список.",
-            show_alert=True,
-        )
-
-
-@dp.callback_query(F.data.startswith("latest_product:"))
-async def latest_arrival_product(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("manual_new_product:"))
+async def manual_new_product_card(callback: CallbackQuery):
     _, key, page_text = callback.data.split(":", 2)
     product = product_cache.get(key)
 
     if not product:
         products = await get_in_stock_products()
         product = next(
-            (
-                item
-                for item in products
-                if product_key(item) == key
-            ),
+            (item for item in products if product_key(item) == key),
             None,
         )
 
-    if not product or not is_in_stock(product):
-        await callback.answer(
-            "Товар уже недоступний.",
-            show_alert=True,
-        )
+    if not product:
+        await callback.answer("Товар не знайдено.", show_alert=True)
         return
 
-    recent = user_recent[callback.from_user.id]
-    if key in recent:
-        recent.remove(key)
-    recent.insert(0, key)
-    del recent[10:]
-
     image_url = get_image_url(product)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="🛒 Додати в кошик",
-            callback_data=f"add:{key}",
-        )],
-        [InlineKeyboardButton(
-            text="❤️ В обране",
-            callback_data=f"favorite_add:{key}",
-        )],
-        [InlineKeyboardButton(
-            text="🌐 Відкрити на сайті",
-            url=product_link(product),
-        )],
-        [InlineKeyboardButton(
-            text="⬅️ До останніх надходжень",
-            callback_data=f"latest_page:{page_text}",
-        )],
-    ])
+    keyboard = card_keyboard(
+        product,
+        callback.from_user.id,
+        InlineKeyboardButton(
+            text="⬅️ До новинок",
+            callback_data=f"manual_new_page:{page_text}",
+        ),
+    )
 
     if image_url:
         await callback.message.answer_photo(
@@ -2382,8 +2436,74 @@ async def latest_arrival_product(callback: CallbackQuery):
             parse_mode="HTML",
             reply_markup=keyboard,
         )
-
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_new_add:"))
+async def admin_new_add(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Немає доступу.", show_alert=True)
+        return
+
+    key = callback.data.split(":", 1)[1]
+    product = product_cache.get(key)
+    if not product:
+        products = await get_in_stock_products()
+        product = next(
+            (item for item in products if product_key(item) == key),
+            None,
+        )
+
+    if not product:
+        await callback.answer("Товар не знайдено.", show_alert=True)
+        return
+
+    article = product_article(product)
+    manual_new_articles.add(article)
+
+    if save_manual_new_articles(manual_new_articles):
+        await callback.answer("Додано в новинки 🆕", show_alert=True)
+        await callback.message.edit_reply_markup(
+            reply_markup=card_keyboard(product, callback.from_user.id)
+        )
+    else:
+        await callback.answer("Не вдалося зберегти.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_new_remove:"))
+async def admin_new_remove(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Немає доступу.", show_alert=True)
+        return
+
+    key = callback.data.split(":", 1)[1]
+    product = product_cache.get(key)
+    if not product:
+        await callback.answer("Товар не знайдено.", show_alert=True)
+        return
+
+    manual_new_articles.discard(product_article(product))
+
+    if save_manual_new_articles(manual_new_articles):
+        await callback.answer("Прибрано з новинок.", show_alert=True)
+        await callback.message.edit_reply_markup(
+            reply_markup=card_keyboard(product, callback.from_user.id)
+        )
+    else:
+        await callback.answer("Не вдалося зберегти.", show_alert=True)
+
+
+@dp.message(Command("admin"))
+async def admin_status(message: Message):
+    await message.answer(
+        "⚙️ <b>Адмін-панель OKVEJ</b>\n\n"
+        f"Ваш Telegram ID: <code>{message.from_user.id}</code>\n"
+        f"Доступ адміністратора: <b>{'так' if is_admin(message.from_user.id) else 'ні'}</b>\n"
+        f"Новинок вибрано: <b>{len(manual_new_articles)}</b>\n\n"
+        "Щоб додати товар у новинки, відкрийте його картку.",
+        parse_mode="HTML",
+    )
+
 
 
 
