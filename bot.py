@@ -24,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "10.2"
-BOT_BUILD = "2026-07-14-precise-search-ranking"
+BOT_VERSION = "11.0"
+BOT_BUILD = "2026-07-14-favorites-cart-cards-new"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -80,10 +80,10 @@ class CheckoutState(StatesGroup):
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔍 Пошук товару")],
-        [KeyboardButton(text="❤️ Обране"), KeyboardButton(text="🕒 Переглянуті")],
-        [KeyboardButton(text="🛒 Кошик"), KeyboardButton(text="🚚 Доставка й оплата")],
-        [KeyboardButton(text="🌐 Сайт"), KeyboardButton(text="💬 Менеджер")],
-        [KeyboardButton(text="📢 Канал OKVEJ")],
+        [KeyboardButton(text="🆕 Новинки"), KeyboardButton(text="❤️ Обране")],
+        [KeyboardButton(text="🕒 Переглянуті"), KeyboardButton(text="🛒 Кошик")],
+        [KeyboardButton(text="🚚 Доставка й оплата"), KeyboardButton(text="💬 Менеджер")],
+        [KeyboardButton(text="🌐 Сайт"), KeyboardButton(text="📢 Канал OKVEJ")],
     ],
     resize_keyboard=True,
 )
@@ -961,7 +961,13 @@ def cart_view(user_id):
             )
             number += 1
 
-        lines.extend(["", f"💰 Разом: <b>{total:g} грн</b>"])
+        total_units = sum(cart.values())
+        lines.extend([
+            "",
+            f"📦 Позицій: <b>{len(cart)}</b>",
+            f"🔢 Кількість: <b>{total_units}</b>",
+            f"💰 Разом: <b>{total:g} грн</b>",
+        ])
         text = "\n".join(lines)
 
     rows = []
@@ -1071,6 +1077,12 @@ async def favorites_command(message: Message):
             "❤️ <b>Обране порожнє</b>\n\n"
             "Додавайте товари кнопкою «В обране».",
             parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="🍬 Перейти до каталогу",
+                    callback_data="catalog_categories",
+                )]
+            ]),
         )
         return
 
@@ -2143,6 +2155,149 @@ async def recent_product(callback: CallbackQuery):
             product_text(product),
             parse_mode="HTML",
             reply_markup=product_keyboard(product),
+        )
+
+    await callback.answer()
+
+
+NEW_PRODUCTS_LIMIT = 30
+NEW_PRODUCTS_PAGE_SIZE = 8
+
+
+def newest_products(products):
+    return list(reversed(products))[:NEW_PRODUCTS_LIMIT]
+
+
+def new_products_keyboard(products, page=0):
+    page_count = max(
+        1,
+        (len(products) + NEW_PRODUCTS_PAGE_SIZE - 1) // NEW_PRODUCTS_PAGE_SIZE,
+    )
+    page = max(0, min(page, page_count - 1))
+    start = page * NEW_PRODUCTS_PAGE_SIZE
+    page_items = products[start:start + NEW_PRODUCTS_PAGE_SIZE]
+
+    rows = []
+    for product in page_items:
+        key = product_key(product)
+        product_cache[key] = product
+        title = clean_product_title(localize(product.get("title")))
+        price = price_number(product)
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🆕 {title[:36]} — {price:g} грн",
+                callback_data=f"new_product:{key}:{page}",
+            )
+        ])
+
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️ Попередня",
+                callback_data=f"new_page:{page - 1}",
+            )
+        )
+
+    navigation.append(
+        InlineKeyboardButton(
+            text=f"Сторінка {page + 1}/{page_count}",
+            callback_data="catalog_noop",
+        )
+    )
+
+    if page + 1 < page_count:
+        navigation.append(
+            InlineKeyboardButton(
+                text="Наступна ➡️",
+                callback_data=f"new_page:{page + 1}",
+            )
+        )
+
+    rows.append(navigation)
+    rows.append([
+        InlineKeyboardButton(
+            text="🍬 До каталогу",
+            callback_data="catalog_categories",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(F.text == "🆕 Новинки")
+async def new_products_menu(message: Message):
+    products = await get_in_stock_products()
+    items = newest_products(products)
+
+    await message.answer(
+        "🆕 <b>Новинки OKVEJ</b>\n\n"
+        f"Показуємо останні <b>{len(items)}</b> товарів "
+        "за порядком Horoshop API.",
+        parse_mode="HTML",
+        reply_markup=new_products_keyboard(items, 0),
+    )
+
+
+@dp.callback_query(F.data.startswith("new_page:"))
+async def new_products_page(callback: CallbackQuery):
+    page = int(callback.data.split(":", 1)[1])
+    products = await get_in_stock_products()
+    items = newest_products(products)
+
+    await callback.message.edit_reply_markup(
+        reply_markup=new_products_keyboard(items, page),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("new_product:"))
+async def new_product_card(callback: CallbackQuery):
+    _, key, page_text = callback.data.split(":", 2)
+    product = product_cache.get(key)
+
+    if not product:
+        products = await get_in_stock_products()
+        product = next(
+            (item for item in products if product_key(item) == key),
+            None,
+        )
+
+    if not product or not is_in_stock(product):
+        await callback.answer("Товар уже недоступний.", show_alert=True)
+        return
+
+    image_url = get_image_url(product)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🛒 Додати в кошик",
+            callback_data=f"add:{key}",
+        )],
+        [InlineKeyboardButton(
+            text="❤️ В обране",
+            callback_data=f"favorite_add:{key}",
+        )],
+        [InlineKeyboardButton(
+            text="🌐 Відкрити на сайті",
+            url=product_link(product),
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ До новинок",
+            callback_data=f"new_page:{page_text}",
+        )],
+    ])
+
+    if image_url:
+        await callback.message.answer_photo(
+            photo=image_url,
+            caption=product_text(product),
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    else:
+        await callback.message.answer(
+            product_text(product),
+            parse_mode="HTML",
+            reply_markup=keyboard,
         )
 
     await callback.answer()
