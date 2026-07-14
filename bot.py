@@ -5,6 +5,7 @@ import re
 import json
 import time
 import hashlib
+import html
 from collections import defaultdict
 from urllib.parse import urljoin, urlparse, unquote
 
@@ -23,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "6.3"
-BOT_BUILD = "2026-07-13-category-order-ui"
+BOT_VERSION = "7.0"
+BOT_BUILD = "2026-07-14-product-card-cart"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -846,54 +847,139 @@ async def load_product_from_page(link):
     }
 
 
+def clean_product_description(value):
+    value = html.unescape(str(value or ""))
+    value = re.sub(r"<[^>]+>", " ", value)
+    return " ".join(value.split())
+
+
+def product_weight(product):
+    for key in ("weight", "packing", "packaging", "unit", "measure"):
+        value = localize(product.get(key)).strip()
+        if value:
+            return value
+    return ""
+
+
 def product_text(product):
-    title = localize(product.get("title"))
+    title = localize(product.get("title")) or "Товар"
     price = price_number(product)
-    return (
-        f"🍬 <b>{title}</b>\n\n"
-        f"✅ В наявності\n"
-        f"💰 Ціна: <b>{price:g} грн</b>\n"
-        f"🔗 {product_link(product)}"
+    article = product.get("article") or "—"
+    weight = product_weight(product)
+
+    description = localize(
+        product.get("description")
+        or product.get("short_description")
+        or product.get("description_short")
     )
+    description = clean_product_description(description)
+
+    lines = [
+        f"🍬 <b>{title}</b>",
+        "",
+        f"💰 Ціна: <b>{price:g} грн</b>",
+    ]
+
+    if weight:
+        lines.append(f"⚖️ Фасування: <b>{weight}</b>")
+
+    lines.extend([
+        f"🏷 Артикул: <code>{article}</code>",
+        "✅ В наявності",
+    ])
+
+    if description:
+        lines.extend(["", f"📝 {description[:700]}"])
+
+    return "\n".join(lines)
 
 
 def product_keyboard(product):
     key = product_key(product)
     product_cache[key] = product
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Додати в кошик", callback_data=f"add:{key}")],
-        [InlineKeyboardButton(text="🛒 Купити на сайті", url=product_link(product))],
+        [InlineKeyboardButton(text="🛒 Додати в кошик", callback_data=f"add:{key}")],
+        [InlineKeyboardButton(text="🌐 Відкрити на сайті", url=product_link(product))],
+        [InlineKeyboardButton(text="🛍 Перейти до кошика", callback_data="open_cart")],
     ])
 
 
 def cart_view(user_id):
     cart = user_carts[user_id]
+
     if not cart:
-        text = "🛒 <b>Кошик порожній</b>\n\nЗнайдіть товар і натисніть «➕ Додати в кошик»."
+        text = (
+            "🛒 <b>Кошик порожній</b>\n\n"
+            "Додайте товари з каталогу."
+        )
     else:
-        lines = ["🛒 <b>Ваш кошик</b>\n"]
+        lines = ["🛒 <b>Ваш кошик</b>", ""]
         total = 0.0
+        number = 1
+
         for key, qty in cart.items():
             product = product_cache.get(key)
             if not product:
                 continue
+
             price = price_number(product)
             subtotal = price * qty
             total += subtotal
-            lines.append(f"• <b>{localize(product.get('title'))}</b>\n  {qty} × {price:g} = {subtotal:g} грн")
-        lines.append(f"\n💰 <b>Разом: {total:g} грн</b>")
+            title = localize(product.get("title")) or "Товар"
+
+            lines.append(
+                f"{number}. <b>{title}</b>\n"
+                f"   {qty} × {price:g} грн = <b>{subtotal:g} грн</b>"
+            )
+            number += 1
+
+        lines.extend(["", f"💰 Разом: <b>{total:g} грн</b>"])
         text = "\n".join(lines)
 
     rows = []
-    for key in cart:
+
+    for key, qty in cart.items():
         product = product_cache.get(key)
-        if product:
-            title = localize(product.get("title"))[:25]
-            rows.append([InlineKeyboardButton(text=f"➖ {title}", callback_data=f"remove:{key}")])
-    rows.extend([
-        [InlineKeyboardButton(text="🗑 Очистити кошик", callback_data="clear_cart")],
-        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="checkout_start")],
+        if not product:
+            continue
+
+        title = localize(product.get("title")) or "Товар"
+        rows.append([
+            InlineKeyboardButton(text="➖", callback_data=f"cart_minus:{key}"),
+            InlineKeyboardButton(
+                text=f"{title[:22]} × {qty}",
+                callback_data="catalog_noop",
+            ),
+            InlineKeyboardButton(text="➕", callback_data=f"cart_plus:{key}"),
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                text="🗑 Видалити позицію",
+                callback_data=f"cart_remove:{key}",
+            )
+        ])
+
+    if cart:
+        rows.append([
+            InlineKeyboardButton(
+                text="🧹 Очистити кошик",
+                callback_data="clear_cart",
+            )
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                text="✅ Оформити замовлення",
+                callback_data="checkout_start",
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text="🍬 Продовжити покупки",
+            callback_data="catalog_categories",
+        )
     ])
+
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -911,17 +997,63 @@ async def add_to_cart(callback: CallbackQuery):
     await callback.answer("✅ Додано в кошик")
 
 
-@dp.callback_query(F.data.startswith("remove:"))
-async def remove_from_cart(callback: CallbackQuery):
+@dp.callback_query(F.data == "open_cart")
+async def open_cart(callback: CallbackQuery):
+    text_value, keyboard = cart_view(callback.from_user.id)
+    await callback.message.answer(
+        text_value,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cart_plus:"))
+async def cart_plus(callback: CallbackQuery):
     key = callback.data.split(":", 1)[1]
     cart = user_carts[callback.from_user.id]
+    cart[key] = cart.get(key, 0) + 1
+
+    text_value, keyboard = cart_view(callback.from_user.id)
+    await callback.message.edit_text(
+        text_value,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cart_minus:"))
+async def cart_minus(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    cart = user_carts[callback.from_user.id]
+
     if key in cart:
         cart[key] -= 1
         if cart[key] <= 0:
             cart.pop(key, None)
-    text, keyboard = cart_view(callback.from_user.id)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    text_value, keyboard = cart_view(callback.from_user.id)
+    await callback.message.edit_text(
+        text_value,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cart_remove:"))
+async def cart_remove(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    user_carts[callback.from_user.id].pop(key, None)
+
+    text_value, keyboard = cart_view(callback.from_user.id)
+    await callback.message.edit_text(
+        text_value,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+    await callback.answer("Позицію видалено")
 
 
 @dp.callback_query(F.data == "clear_cart")

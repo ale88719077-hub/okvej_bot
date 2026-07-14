@@ -63,7 +63,12 @@ class HoroshopAPI:
                 "article",
                 "quantity",
                 "stock",
-                "category"
+                "category",
+                "description",
+                "short_description",
+                "weight",
+                "packing",
+                "unit"
             ]
         })
 
