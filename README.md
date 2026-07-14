@@ -1,4 +1,4 @@
-# OKVEJ full characteristics diagnostic
+# OKVEJ raw product diagnostic
 
-После деплоя отправьте боту `/debug_manufacturers`.
-Команда покажет все непустые характеристики первых 8 товаров.
+После деплоя отправьте боту `/debug_raw_product`.
+Команда покажет сырой JSON первого товара из Horoshop API.

@@ -1603,6 +1603,63 @@ async def debug_manufacturers(message: Message):
 
 
 
+@dp.message(Command("debug_raw_product"))
+async def debug_raw_product(message: Message):
+    """Показує сирий JSON першого товару без обробки."""
+    loading = await message.answer("🔎 Завантажую сирий JSON товару...")
+
+    try:
+        products = await get_in_stock_products(force_refresh=True)
+
+        if not products:
+            await loading.edit_text("❌ Не знайдено товарів у наявності.")
+            return
+
+        product = products[0]
+
+        raw_json = json.dumps(
+            product,
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+
+        title = clean_product_title(localize(product.get("title")))
+
+        chunks = [
+            raw_json[index:index + 3300]
+            for index in range(0, len(raw_json), 3300)
+        ]
+
+        await loading.edit_text(
+            f"🔎 <b>Сирий JSON товару</b>\n\n"
+            f"🍬 <b>{title}</b>\n\n"
+            f"<pre>{html.escape(chunks[0])}</pre>",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+        for chunk in chunks[1:4]:
+            await message.answer(
+                f"<pre>{html.escape(chunk)}</pre>",
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+        if len(chunks) > 4:
+            await message.answer(
+                "⚠️ JSON дуже великий. Показано перші 4 частини."
+            )
+
+    except Exception as error:
+        logging.exception("Raw product debug error")
+        await loading.edit_text(
+            "❌ Помилка перевірки JSON:\n"
+            f"<code>{html.escape(str(error)[:1000])}</code>",
+            parse_mode="HTML",
+        )
+
+
 @dp.message(Command("version"))
 async def version_handler(message: Message):
     await message.answer(
