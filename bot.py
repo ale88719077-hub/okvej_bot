@@ -1445,6 +1445,108 @@ async def manual_post_publish(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка публикации: {e}")
 
 
+@dp.message(Command("debug_tags"))
+async def debug_tags(message: Message):
+    """Показує, чи повертає Horoshop API теги або службові ознаки товару."""
+    loading = await message.answer("🔎 Перевіряю поля тегів у Horoshop API...")
+
+    try:
+        products = await get_all_products(max_items=100, batch_size=100)
+
+        if not products:
+            await loading.edit_text("❌ API не повернув жодного товару.")
+            return
+
+        candidate_fields = (
+            "tags",
+            "tag",
+            "labels",
+            "label",
+            "badges",
+            "badge",
+            "groups",
+            "group",
+            "collections",
+            "collection",
+            "features",
+            "characteristics",
+            "params",
+            "parameters",
+            "special",
+            "hit",
+            "is_hit",
+            "bestseller",
+            "is_bestseller",
+            "new",
+            "is_new",
+            "sale",
+            "is_sale",
+        )
+
+        field_counts = {}
+        examples = {}
+
+        for product in products:
+            for field in candidate_fields:
+                value = product.get(field)
+                if value not in (None, "", [], {}, False):
+                    field_counts[field] = field_counts.get(field, 0) + 1
+                    examples.setdefault(field, value)
+
+        lines = [
+            "🔎 <b>Перевірка тегів Horoshop API</b>",
+            "",
+            f"Перевірено товарів: <b>{len(products)}</b>",
+            "",
+        ]
+
+        if not field_counts:
+            lines.extend([
+                "⚠️ У перших 100 товарах не знайдено полів тегів,",
+                "позначок «хіт», «новинка» або «акція».",
+                "",
+                "Ймовірно, API їх не повертає у поточному експорті.",
+            ])
+        else:
+            lines.append("<b>Знайдені поля:</b>")
+            for field, count in sorted(
+                field_counts.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            ):
+                sample = json.dumps(
+                    examples[field],
+                    ensure_ascii=False,
+                    default=str,
+                )
+                lines.append(
+                    f"• <code>{field}</code> — {count} товарів\n"
+                    f"  приклад: <code>{sample[:500]}</code>"
+                )
+
+        # Also show all top-level keys of the first product.
+        first_keys = sorted(products[0].keys())
+        lines.extend([
+            "",
+            "<b>Поля першого товару:</b>",
+            "<code>" + ", ".join(first_keys)[:1800] + "</code>",
+        ])
+
+        await loading.edit_text(
+            "\n".join(lines)[:3900],
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    except Exception as error:
+        logging.exception("Tags debug error")
+        await loading.edit_text(
+            "❌ Помилка перевірки API:\n"
+            f"<code>{str(error)[:1000]}</code>",
+            parse_mode="HTML",
+        )
+
+
 @dp.message(Command("version"))
 async def version_handler(message: Message):
     await message.answer(

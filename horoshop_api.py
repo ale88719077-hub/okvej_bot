@@ -68,7 +68,22 @@ class HoroshopAPI:
                 "short_description",
                 "weight",
                 "packing",
-                "unit"
+                "unit",
+                "tags",
+                "labels",
+                "badges",
+                "collections",
+                "features",
+                "characteristics",
+                "params",
+                "hit",
+                "is_hit",
+                "bestseller",
+                "is_bestseller",
+                "new",
+                "is_new",
+                "sale",
+                "is_sale"
             ]
         })
 
