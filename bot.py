@@ -24,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "9.0"
-BOT_BUILD = "2026-07-14-manufacturer-filter"
+BOT_VERSION = "10.0"
+BOT_BUILD = "2026-07-14-smart-search-recent"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -51,6 +51,7 @@ shop = HoroshopAPI(
 # Корзины хранятся в памяти. После перезапуска Railway они очищаются.
 user_carts = defaultdict(dict)
 user_favorites = defaultdict(set)
+user_recent = defaultdict(list)
 product_cache = {}
 catalog_products_cache = []
 catalog_cache_until = 0.0
@@ -78,8 +79,9 @@ class CheckoutState(StatesGroup):
 
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🚚 Доставка й оплата")],
-        [KeyboardButton(text="🔍 Пошук товару"), KeyboardButton(text="🛒 Кошик")],
+        [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔍 Пошук товару")],
+        [KeyboardButton(text="❤️ Обране"), KeyboardButton(text="🕒 Переглянуті")],
+        [KeyboardButton(text="🛒 Кошик"), KeyboardButton(text="🚚 Доставка й оплата")],
         [KeyboardButton(text="🌐 Сайт"), KeyboardButton(text="💬 Менеджер")],
         [KeyboardButton(text="📢 Канал OKVEJ")],
     ],
@@ -472,92 +474,6 @@ def category_name(product):
         or category_from_title(product)
         or "Інші товари"
     )
-
-
-def manufacturer_name(product):
-    """Повертає виробника з characteristics.proizvoditel."""
-    characteristics = product.get("characteristics") or {}
-    if not isinstance(characteristics, dict):
-        return "Інші виробники"
-
-    manufacturer = (
-        characteristics.get("proizvoditel")
-        or characteristics.get("manufacturer")
-        or characteristics.get("brand")
-        or characteristics.get("brend")
-    )
-
-    if isinstance(manufacturer, dict):
-        value = manufacturer.get("value", manufacturer)
-        name = localize(value).strip()
-    else:
-        name = localize(manufacturer).strip()
-
-    return name or "Інші виробники"
-
-
-def manufacturer_key(name: str) -> str:
-    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
-
-
-def grouped_manufacturers(products):
-    groups = {}
-    for product in products:
-        name = manufacturer_name(product)
-        groups.setdefault(name, []).append(product)
-    return dict(sorted(groups.items(), key=lambda item: (item[0] == "Інші виробники", item[0].lower())))
-
-
-def find_manufacturer(products, key: str):
-    for name, items in grouped_manufacturers(products).items():
-        if manufacturer_key(name) == key:
-            return name, items
-    return None, []
-
-
-MANUFACTURER_PAGE_SIZE = 12
-
-
-def manufacturers_keyboard(products, category_id: str, page: int = 0) -> InlineKeyboardMarkup:
-    groups = list(grouped_manufacturers(products).items())
-    total = len(groups)
-    page_count = max(1, (total + MANUFACTURER_PAGE_SIZE - 1) // MANUFACTURER_PAGE_SIZE)
-    page = max(0, min(page, page_count - 1))
-    start = page * MANUFACTURER_PAGE_SIZE
-    page_items = groups[start:start + MANUFACTURER_PAGE_SIZE]
-
-    rows = []
-    for name, items in page_items:
-        rows.append([InlineKeyboardButton(
-            text=f"🏭 {name[:40]} ({len(items)})",
-            callback_data=f"manufacturer:{category_id}:{manufacturer_key(name)}:0",
-        )])
-
-    navigation = []
-    if page > 0:
-        navigation.append(InlineKeyboardButton(
-            text="⬅️ Попередня",
-            callback_data=f"manufacturers_page:{category_id}:{page - 1}",
-        ))
-    navigation.append(InlineKeyboardButton(
-        text=f"Сторінка {page + 1}/{page_count}",
-        callback_data="catalog_noop",
-    ))
-    if page + 1 < page_count:
-        navigation.append(InlineKeyboardButton(
-            text="Наступна ➡️",
-            callback_data=f"manufacturers_page:{category_id}:{page + 1}",
-        ))
-    rows.append(navigation)
-    rows.append([InlineKeyboardButton(
-        text="📄 Показати всі товари",
-        callback_data=f"catalog_page:{category_id}:0",
-    )])
-    rows.append([InlineKeyboardButton(
-        text="⬅️ До категорій",
-        callback_data="catalog_categories",
-    )])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def category_key(name: str) -> str:
@@ -1531,135 +1447,6 @@ async def manual_post_publish(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка публикации: {e}")
 
 
-@dp.message(Command("debug_manufacturers"))
-async def debug_manufacturers(message: Message):
-    """Показує всі непорожні характеристики перших товарів."""
-    loading = await message.answer(
-        "🔎 Перевіряю всі характеристики товарів..."
-    )
-
-    try:
-        products = await get_in_stock_products(force_refresh=True)
-
-        if not products:
-            await loading.edit_text("❌ Не знайдено товарів у наявності.")
-            return
-
-        sample = products[:8]
-        lines = [
-            "🔎 <b>Повна перевірка характеристик</b>",
-            "",
-            f"Перевірено товарів: <b>{len(sample)}</b>",
-            "",
-        ]
-
-        for index, product in enumerate(sample, start=1):
-            title = clean_product_title(localize(product.get("title")))
-            characteristics = product.get("characteristics") or {}
-
-            lines.append(f"<b>{index}. {title[:100]}</b>")
-
-            if not isinstance(characteristics, dict):
-                lines.append("   <code>characteristics не є словником</code>")
-                lines.append("")
-                continue
-
-            found_any = False
-
-            for key, raw_value in characteristics.items():
-                value = raw_value
-
-                if isinstance(value, dict):
-                    value = value.get("value", value)
-
-                localized = localize(value).strip()
-
-                if localized and localized not in ("0", "None", "null"):
-                    found_any = True
-                    lines.append(
-                        f"   <code>{key}</code> = "
-                        f"<code>{localized[:300]}</code>"
-                    )
-
-            if not found_any:
-                lines.append("   <code>немає заповнених характеристик</code>")
-
-            lines.append("")
-
-        await loading.edit_text(
-            "\n".join(lines)[:3900],
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-
-    except Exception as error:
-        logging.exception("Full characteristics debug error")
-        await loading.edit_text(
-            "❌ Помилка перевірки характеристик:\n"
-            f"<code>{str(error)[:1000]}</code>",
-            parse_mode="HTML",
-        )
-
-
-
-
-@dp.message(Command("debug_raw_product"))
-async def debug_raw_product(message: Message):
-    """Показує сирий JSON першого товару без обробки."""
-    loading = await message.answer("🔎 Завантажую сирий JSON товару...")
-
-    try:
-        products = await get_in_stock_products(force_refresh=True)
-
-        if not products:
-            await loading.edit_text("❌ Не знайдено товарів у наявності.")
-            return
-
-        product = products[0]
-
-        raw_json = json.dumps(
-            product,
-            ensure_ascii=False,
-            indent=2,
-            default=str,
-        )
-
-        title = clean_product_title(localize(product.get("title")))
-
-        chunks = [
-            raw_json[index:index + 3300]
-            for index in range(0, len(raw_json), 3300)
-        ]
-
-        await loading.edit_text(
-            f"🔎 <b>Сирий JSON товару</b>\n\n"
-            f"🍬 <b>{title}</b>\n\n"
-            f"<pre>{html.escape(chunks[0])}</pre>",
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-
-        for chunk in chunks[1:4]:
-            await message.answer(
-                f"<pre>{html.escape(chunk)}</pre>",
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-
-        if len(chunks) > 4:
-            await message.answer(
-                "⚠️ JSON дуже великий. Показано перші 4 частини."
-            )
-
-    except Exception as error:
-        logging.exception("Raw product debug error")
-        await loading.edit_text(
-            "❌ Помилка перевірки JSON:\n"
-            f"<code>{html.escape(str(error)[:1000])}</code>",
-            parse_mode="HTML",
-        )
-
-
 @dp.message(Command("version"))
 async def version_handler(message: Message):
     await message.answer(
@@ -1801,152 +1588,12 @@ async def catalog_category(callback: CallbackQuery):
         await callback.answer("Категорію не знайдено.", show_alert=True)
         return
 
-    manufacturer_count = len(grouped_manufacturers(category_products))
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"🏭 За виробником ({manufacturer_count})",
-            callback_data=f"manufacturers_page:{category_id}:0",
-        )],
-        [InlineKeyboardButton(
-            text=f"📄 Показати всі ({len(category_products)})",
-            callback_data=f"catalog_page:{category_id}:0",
-        )],
-        [InlineKeyboardButton(
-            text="⬅️ До категорій",
-            callback_data="catalog_categories",
-        )],
-    ])
-
     await callback.message.edit_text(
-        f"🍬 <b>{title}</b>\n\n"
-        f"✅ У наявності: <b>{len(category_products)}</b>\n"
-        f"🏭 Виробників: <b>{manufacturer_count}</b>\n\n"
-        "Оберіть спосіб перегляду:",
+        catalog_page_text(title, category_products, 0),
         parse_mode="HTML",
-        reply_markup=keyboard,
+        reply_markup=catalog_page_keyboard(category_products, category_id, 0),
     )
     await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("manufacturers_page:"))
-async def manufacturers_page(callback: CallbackQuery):
-    try:
-        _, category_id, page_text = callback.data.split(":", 2)
-        page = int(page_text)
-        products = await get_in_stock_products()
-        title, category_products = find_category(products, category_id)
-        if not category_products:
-            await callback.answer("Категорію не знайдено.", show_alert=True)
-            return
-
-        manufacturers = grouped_manufacturers(category_products)
-        await callback.message.edit_text(
-            f"🍬 <b>{title}</b>\n\n"
-            f"🏭 Виробників: <b>{len(manufacturers)}</b>\n\n"
-            "Оберіть виробника:",
-            parse_mode="HTML",
-            reply_markup=manufacturers_keyboard(category_products, category_id, page),
-        )
-        await callback.answer()
-    except Exception:
-        logging.exception("Manufacturers page error")
-        await callback.answer("Не вдалося відкрити список виробників.", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("manufacturer:"))
-async def manufacturer_products(callback: CallbackQuery):
-    try:
-        _, category_id, manufacturer_id, page_text = callback.data.split(":", 3)
-        page = int(page_text)
-        products = await get_in_stock_products()
-        category_title, category_products = find_category(products, category_id)
-        manufacturer_title, manufacturer_items = find_manufacturer(category_products, manufacturer_id)
-        if not manufacturer_items:
-            await callback.answer("Виробника не знайдено.", show_alert=True)
-            return
-
-        total = len(manufacturer_items)
-        page_count = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
-        page = max(0, min(page, page_count - 1))
-        start = page * CATALOG_PAGE_SIZE
-        page_items = manufacturer_items[start:start + CATALOG_PAGE_SIZE]
-
-        rows = []
-        for product in page_items:
-            key = product_key(product)
-            product_cache[key] = product
-            title = clean_product_title(localize(product.get("title")))
-            price = price_number(product)
-            rows.append([InlineKeyboardButton(
-                text=f"{title[:39]} — {price:g} грн",
-                callback_data=f"manufacturer_product:{key}:{category_id}:{manufacturer_id}:{page}",
-            )])
-
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton(
-                text="⬅️ Попередня",
-                callback_data=f"manufacturer:{category_id}:{manufacturer_id}:{page - 1}",
-            ))
-        nav.append(InlineKeyboardButton(text=f"Сторінка {page + 1}/{page_count}", callback_data="catalog_noop"))
-        if page + 1 < page_count:
-            nav.append(InlineKeyboardButton(
-                text="Наступна ➡️",
-                callback_data=f"manufacturer:{category_id}:{manufacturer_id}:{page + 1}",
-            ))
-        rows.append(nav)
-        rows.append([InlineKeyboardButton(
-            text="⬅️ До виробників",
-            callback_data=f"manufacturers_page:{category_id}:0",
-        )])
-        rows.append([InlineKeyboardButton(text="⬅️ До категорій", callback_data="catalog_categories")])
-
-        await callback.message.edit_text(
-            f"🏭 <b>{manufacturer_title}</b>\n"
-            f"🍬 Категорія: <b>{category_title}</b>\n\n"
-            f"✅ У наявності: <b>{total}</b>\n"
-            f"📄 Сторінка: <b>{page + 1} із {page_count}</b>\n\n"
-            "Оберіть товар:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        )
-        await callback.answer()
-    except Exception:
-        logging.exception("Manufacturer products error")
-        await callback.answer("Не вдалося відкрити товари виробника.", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("manufacturer_product:"))
-async def manufacturer_product(callback: CallbackQuery):
-    try:
-        _, key, category_id, manufacturer_id, page_text = callback.data.split(":", 4)
-        product = product_cache.get(key)
-        if not product:
-            products = await get_in_stock_products()
-            product = next((item for item in products if product_key(item) == key), None)
-        if not product or not is_in_stock(product):
-            await callback.answer("Цього товару вже немає в наявності.", show_alert=True)
-            return
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Додати в кошик", callback_data=f"add:{key}")],
-            [InlineKeyboardButton(text="❤️ В обране", callback_data=f"favorite_add:{key}")],
-            [InlineKeyboardButton(text="🌐 Відкрити на сайті", url=product_link(product))],
-            [InlineKeyboardButton(
-                text="⬅️ До товарів виробника",
-                callback_data=f"manufacturer:{category_id}:{manufacturer_id}:{page_text}",
-            )],
-        ])
-
-        image_url = get_image_url(product)
-        if image_url:
-            await callback.message.answer_photo(photo=image_url, caption=product_text(product), parse_mode="HTML", reply_markup=keyboard)
-        else:
-            await callback.message.answer(product_text(product), parse_mode="HTML", reply_markup=keyboard)
-        await callback.answer()
-    except Exception:
-        logging.exception("Manufacturer product card error")
-        await callback.answer("Не вдалося відкрити товар.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("catalog_page:"))
@@ -2001,6 +1648,13 @@ async def catalog_product(callback: CallbackQuery):
             return
 
         page = int(page_text)
+
+        recent = user_recent[callback.from_user.id]
+        if key in recent:
+            recent.remove(key)
+        recent.insert(0, key)
+        del recent[10:]
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
                 text="🛒 Додати в кошик",
@@ -2048,34 +1702,333 @@ async def catalog_product(callback: CallbackQuery):
         )
 
 
+SEARCH_PAGE_SIZE = 8
+
+
+def normalize_search_text(value):
+    value = str(value or "").lower()
+    value = value.replace("ё", "е")
+    value = re.sub(r"[^a-zа-яіїєґ0-9]+", " ", value)
+    return " ".join(value.split())
+
+
+def product_search_score(product, query):
+    query_normalized = normalize_search_text(query)
+
+    if not query_normalized:
+        return 0
+
+    title = clean_product_title(localize(product.get("title")))
+    title_normalized = normalize_search_text(title)
+    article = normalize_search_text(product.get("article"))
+
+    query_words = query_normalized.split()
+    score = 0
+
+    if query_normalized == article and article:
+        score += 1000
+
+    if query_normalized == title_normalized:
+        score += 800
+    elif title_normalized.startswith(query_normalized):
+        score += 500
+    elif query_normalized in title_normalized:
+        score += 300
+
+    matched_words = sum(
+        1 for word in query_words
+        if word in title_normalized or word in article
+    )
+    score += matched_words * 80
+
+    if all(
+        word in title_normalized or word in article
+        for word in query_words
+    ):
+        score += 200
+
+    return score
+
+
+def search_products_ranked(products, query):
+    scored = []
+
+    for product in products:
+        score = product_search_score(product, query)
+        if score > 0:
+            scored.append((score, product))
+
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            clean_product_title(
+                localize(item[1].get("title"))
+            ).lower(),
+        )
+    )
+
+    return [product for _, product in scored]
+
+
+def search_results_keyboard(results, query, page):
+    page_count = max(
+        1,
+        (len(results) + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE,
+    )
+    page = max(0, min(page, page_count - 1))
+
+    start = page * SEARCH_PAGE_SIZE
+    page_items = results[start:start + SEARCH_PAGE_SIZE]
+
+    rows = []
+
+    for product in page_items:
+        key = product_key(product)
+        product_cache[key] = product
+        title = clean_product_title(localize(product.get("title")))
+        price = price_number(product)
+
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{title[:39]} — {price:g} грн",
+                callback_data=f"search_product:{key}:{page}",
+            )
+        ])
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️ Попередня",
+                callback_data=f"search_page:{page - 1}",
+            )
+        )
+
+    navigation.append(
+        InlineKeyboardButton(
+            text=f"Сторінка {page + 1}/{page_count}",
+            callback_data="catalog_noop",
+        )
+    )
+
+    if page + 1 < page_count:
+        navigation.append(
+            InlineKeyboardButton(
+                text="Наступна ➡️",
+                callback_data=f"search_page:{page + 1}",
+            )
+        )
+
+    rows.append(navigation)
+    rows.append([
+        InlineKeyboardButton(
+            text="🔍 Новий пошук",
+            callback_data="search_again",
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @dp.message(F.text == "🔍 Пошук товару")
 async def search_start(message: Message, state: FSMContext):
     await state.set_state(SearchState.waiting_query)
-    await message.answer("🔍 Введіть назву товару")
+    await message.answer(
+        "🔍 <b>Пошук товару</b>\n\n"
+        "Введіть назву, частину назви або артикул.",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(SearchState.waiting_query)
 async def search_products(message: Message, state: FSMContext):
-    query = (message.text or "").strip().lower()
+    query = (message.text or "").strip()
+
+    if len(query) < 2:
+        await message.answer("Введіть щонайменше 2 символи.")
+        return
+
     try:
         products = await get_in_stock_products()
-        results = [
-            p for p in products
-            if query in localize(p.get("title")).lower()
-        ]
+        results = search_products_ranked(products, query)
+
+        await state.update_data(
+            search_query=query,
+            search_result_keys=[
+                product_key(product)
+                for product in results
+            ],
+        )
+
+        for product in results:
+            product_cache[product_key(product)] = product
+
         if not results:
-            await message.answer("😔 Нічого не знайдено в наявності.")
+            await message.answer(
+                "😔 Нічого не знайдено в наявності.\n\n"
+                "Спробуйте коротшу назву або артикул."
+            )
         else:
-            for product in results[:10]:
-                await message.answer(
-                    product_text(product),
-                    parse_mode="HTML",
-                    reply_markup=product_keyboard(product),
-                )
-    except Exception as e:
+            shown_end = min(SEARCH_PAGE_SIZE, len(results))
+            await message.answer(
+                "🔍 <b>Результати пошуку</b>\n\n"
+                f"Запит: <b>{html.escape(query)}</b>\n"
+                f"Знайдено: <b>{len(results)}</b>\n"
+                f"Показано: <b>1–{shown_end}</b>",
+                parse_mode="HTML",
+                reply_markup=search_results_keyboard(
+                    results,
+                    query,
+                    0,
+                ),
+            )
+
+    except Exception:
         logging.exception("Search error")
-        await message.answer(f"❌ Помилка: {e}")
+        await message.answer(
+            "❌ Не вдалося виконати пошук. Спробуйте пізніше."
+        )
+
     await state.clear()
+
+
+@dp.callback_query(F.data.startswith("search_page:"))
+async def search_page(callback: CallbackQuery):
+    page = int(callback.data.split(":", 1)[1])
+
+    # Результати відновлюються з кешу товарів.
+    # Порядок відповідає останньому пошуку користувача.
+    keys = [
+        key for key, product in product_cache.items()
+        if is_in_stock(product)
+    ]
+    results = [product_cache[key] for key in keys]
+
+    if not results:
+        await callback.answer(
+            "Результати пошуку вже застаріли. Виконайте новий пошук.",
+            show_alert=True,
+        )
+        return
+
+    await callback.message.edit_reply_markup(
+        reply_markup=search_results_keyboard(
+            results,
+            "",
+            page,
+        )
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "search_again")
+async def search_again(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SearchState.waiting_query)
+    await callback.message.answer(
+        "🔍 Введіть новий пошуковий запит:"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("search_product:"))
+async def search_product(callback: CallbackQuery):
+    _, key, page_text = callback.data.split(":", 2)
+    product = product_cache.get(key)
+
+    if not product or not is_in_stock(product):
+        await callback.answer(
+            "Товар уже недоступний.",
+            show_alert=True,
+        )
+        return
+
+    recent = user_recent[callback.from_user.id]
+    if key in recent:
+        recent.remove(key)
+    recent.insert(0, key)
+    del recent[10:]
+
+    await callback.message.answer_photo(
+        photo=get_image_url(product),
+        caption=product_text(product),
+        parse_mode="HTML",
+        reply_markup=product_keyboard(product),
+    )
+    await callback.answer()
+
+
+@dp.message(F.text == "❤️ Обране")
+async def favorites_menu(message: Message):
+    await favorites_command(message)
+
+
+@dp.message(F.text == "🕒 Переглянуті")
+async def recent_products(message: Message):
+    keys = user_recent.get(message.from_user.id, [])
+
+    if not keys:
+        await message.answer(
+            "🕒 <b>Переглянутих товарів ще немає</b>",
+            parse_mode="HTML",
+        )
+        return
+
+    rows = []
+    lines = ["🕒 <b>Останні переглянуті</b>", ""]
+
+    for index, key in enumerate(keys[:10], start=1):
+        product = product_cache.get(key)
+        if not product:
+            continue
+
+        title = clean_product_title(localize(product.get("title")))
+        price = price_number(product)
+
+        lines.append(f"{index}. {title} — <b>{price:g} грн</b>")
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🍬 {title[:35]}",
+                callback_data=f"recent_product:{key}",
+            )
+        ])
+
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@dp.callback_query(F.data.startswith("recent_product:"))
+async def recent_product(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    product = product_cache.get(key)
+
+    if not product or not is_in_stock(product):
+        await callback.answer(
+            "Товар уже недоступний.",
+            show_alert=True,
+        )
+        return
+
+    image_url = get_image_url(product)
+
+    if image_url:
+        await callback.message.answer_photo(
+            photo=image_url,
+            caption=product_text(product),
+            parse_mode="HTML",
+            reply_markup=product_keyboard(product),
+        )
+    else:
+        await callback.message.answer(
+            product_text(product),
+            parse_mode="HTML",
+            reply_markup=product_keyboard(product),
+        )
+
+    await callback.answer()
 
 
 @dp.message(F.text == "🛒 Кошик")
