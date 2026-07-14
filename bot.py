@@ -24,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "10.1"
-BOT_BUILD = "2026-07-14-translit-search"
+BOT_VERSION = "10.2"
+BOT_BUILD = "2026-07-14-precise-search-ranking"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1777,6 +1777,10 @@ def search_variants(value):
     return {variant for variant in variants if variant}
 
 
+def compact_search_text(value):
+    return normalize_search_text(value).replace(" ", "")
+
+
 def product_search_score(product, query):
     query_variants = search_variants(query)
 
@@ -1789,35 +1793,72 @@ def product_search_score(product, query):
     title_variants = search_variants(title)
     article_variants = search_variants(article)
 
-    score = 0
+    best_score = 0
 
     for query_variant in query_variants:
-        if query_variant in article_variants and query_variant:
-            score = max(score, 1000)
+        query_compact = compact_search_text(query_variant)
+        query_words = query_variant.split()
+
+        if article and (
+            query_variant == article
+            or query_compact == compact_search_text(article)
+        ):
+            best_score = max(best_score, 2000)
 
         for title_variant in title_variants:
+            title_compact = compact_search_text(title_variant)
+            title_words = title_variant.split()
+
+            if query_compact and query_compact == title_compact:
+                best_score = max(best_score, 1800)
+                continue
+
+            if query_compact and query_compact in title_compact:
+                position = title_compact.find(query_compact)
+                length_penalty = max(0, len(title_compact) - len(query_compact))
+                score = 1450 - position * 8 - min(length_penalty, 300)
+                best_score = max(best_score, score)
+
             if query_variant == title_variant:
-                score = max(score, 800)
-            elif title_variant.startswith(query_variant):
-                score = max(score, 550)
-            elif query_variant in title_variant:
-                score = max(score, 350)
+                best_score = max(best_score, 1700)
+                continue
 
-            query_words = query_variant.split()
-            matched_words = sum(
-                1 for word in query_words
-                if word in title_variant
-            )
+            if title_variant.startswith(query_variant):
+                best_score = max(best_score, 1200)
 
-            score = max(score, matched_words * 100)
+            if len(query_words) >= 2:
+                all_words_match = all(
+                    any(
+                        title_word == query_word
+                        or title_word.startswith(query_word)
+                        or query_word.startswith(title_word)
+                        for title_word in title_words
+                    )
+                    for query_word in query_words
+                )
 
-            if query_words and all(
-                word in title_variant
-                for word in query_words
-            ):
-                score = max(score, 300 + matched_words * 100)
+                if all_words_match:
+                    matched_length = sum(len(word) for word in query_words)
+                    best_score = max(
+                        best_score,
+                        1000 + matched_length * 10,
+                    )
 
-    return score
+            elif len(query_words) == 1:
+                word = query_words[0]
+
+                if len(word) < 3:
+                    if any(title_word.startswith(word) for title_word in title_words):
+                        best_score = max(best_score, 500)
+                else:
+                    if any(title_word == word for title_word in title_words):
+                        best_score = max(best_score, 900)
+                    elif any(title_word.startswith(word) for title_word in title_words):
+                        best_score = max(best_score, 700)
+                    elif word in title_variant:
+                        best_score = max(best_score, 450)
+
+    return best_score
 
 
 def search_products_ranked(products, query):
@@ -1825,12 +1866,18 @@ def search_products_ranked(products, query):
 
     for product in products:
         score = product_search_score(product, query)
-        if score > 0:
+
+        if score >= 450:
             scored.append((score, product))
 
     scored.sort(
         key=lambda item: (
             -item[0],
+            len(
+                clean_product_title(
+                    localize(item[1].get("title"))
+                )
+            ),
             clean_product_title(
                 localize(item[1].get("title"))
             ).lower(),
