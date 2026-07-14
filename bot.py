@@ -24,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "10.0"
-BOT_BUILD = "2026-07-14-smart-search-recent"
+BOT_VERSION = "10.1"
+BOT_BUILD = "2026-07-14-translit-search"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1705,6 +1705,42 @@ async def catalog_product(callback: CallbackQuery):
 SEARCH_PAGE_SIZE = 8
 
 
+CYR_TO_LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "ґ": "g",
+    "д": "d", "е": "e", "ё": "e", "є": "e", "ж": "zh",
+    "з": "z", "и": "i", "і": "i", "ї": "i", "й": "i",
+    "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh",
+    "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e",
+    "ю": "yu", "я": "ya",
+}
+
+
+LAT_TO_CYR_REPLACEMENTS = (
+    ("shch", "щ"),
+    ("sch", "щ"),
+    ("zh", "ж"),
+    ("kh", "х"),
+    ("ch", "ч"),
+    ("sh", "ш"),
+    ("yu", "ю"),
+    ("ya", "я"),
+    ("yo", "е"),
+    ("ye", "е"),
+)
+
+
+LAT_TO_CYR_SINGLE = {
+    "a": "а", "b": "б", "c": "к", "d": "д", "e": "е",
+    "f": "ф", "g": "г", "h": "х", "i": "и", "j": "й",
+    "k": "к", "l": "л", "m": "м", "n": "н", "o": "о",
+    "p": "п", "q": "к", "r": "р", "s": "с", "t": "т",
+    "u": "у", "v": "в", "w": "в", "x": "кс", "y": "и",
+    "z": "з",
+}
+
+
 def normalize_search_text(value):
     value = str(value or "").lower()
     value = value.replace("ё", "е")
@@ -1712,40 +1748,74 @@ def normalize_search_text(value):
     return " ".join(value.split())
 
 
-def product_search_score(product, query):
-    query_normalized = normalize_search_text(query)
+def translit_cyr_to_lat(value):
+    value = normalize_search_text(value)
+    return "".join(CYR_TO_LAT.get(char, char) for char in value)
 
-    if not query_normalized:
+
+def translit_lat_to_cyr(value):
+    value = normalize_search_text(value)
+    result = value
+
+    for source, target in LAT_TO_CYR_REPLACEMENTS:
+        result = result.replace(source, target)
+
+    converted = []
+    for char in result:
+        converted.append(LAT_TO_CYR_SINGLE.get(char, char))
+
+    return "".join(converted)
+
+
+def search_variants(value):
+    normalized = normalize_search_text(value)
+    variants = {
+        normalized,
+        translit_cyr_to_lat(normalized),
+        translit_lat_to_cyr(normalized),
+    }
+    return {variant for variant in variants if variant}
+
+
+def product_search_score(product, query):
+    query_variants = search_variants(query)
+
+    if not query_variants:
         return 0
 
     title = clean_product_title(localize(product.get("title")))
-    title_normalized = normalize_search_text(title)
     article = normalize_search_text(product.get("article"))
 
-    query_words = query_normalized.split()
+    title_variants = search_variants(title)
+    article_variants = search_variants(article)
+
     score = 0
 
-    if query_normalized == article and article:
-        score += 1000
+    for query_variant in query_variants:
+        if query_variant in article_variants and query_variant:
+            score = max(score, 1000)
 
-    if query_normalized == title_normalized:
-        score += 800
-    elif title_normalized.startswith(query_normalized):
-        score += 500
-    elif query_normalized in title_normalized:
-        score += 300
+        for title_variant in title_variants:
+            if query_variant == title_variant:
+                score = max(score, 800)
+            elif title_variant.startswith(query_variant):
+                score = max(score, 550)
+            elif query_variant in title_variant:
+                score = max(score, 350)
 
-    matched_words = sum(
-        1 for word in query_words
-        if word in title_normalized or word in article
-    )
-    score += matched_words * 80
+            query_words = query_variant.split()
+            matched_words = sum(
+                1 for word in query_words
+                if word in title_variant
+            )
 
-    if all(
-        word in title_normalized or word in article
-        for word in query_words
-    ):
-        score += 200
+            score = max(score, matched_words * 100)
+
+            if query_words and all(
+                word in title_variant
+                for word in query_words
+            ):
+                score = max(score, 300 + matched_words * 100)
 
     return score
 
@@ -1836,7 +1906,7 @@ async def search_start(message: Message, state: FSMContext):
     await state.set_state(SearchState.waiting_query)
     await message.answer(
         "🔍 <b>Пошук товару</b>\n\n"
-        "Введіть назву, частину назви або артикул.",
+        "Введіть назву, частину назви або артикул. Можна писати кирилицею або латиницею.",
         parse_mode="HTML",
     )
 
