@@ -27,8 +27,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "11.4"
-BOT_BUILD = "2026-07-14-site-new-badges-v2"
+BOT_VERSION = "11.5"
+BOT_BUILD = "2026-07-14-new-products-timeout-fix"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -61,8 +61,12 @@ catalog_cache_until = 0.0
 
 NEW_PRODUCTS_LIMIT = 50
 NEW_PRODUCTS_CACHE_SECONDS = 6 * 60 * 60
+NEW_PRODUCTS_TOTAL_TIMEOUT = 55
+NEW_PRODUCTS_REQUEST_TIMEOUT = 8
+NEW_PRODUCTS_CONCURRENCY = 30
 new_products_cache = []
 new_products_cache_time = 0.0
+new_products_check_lock = asyncio.Lock()
 
 
 def product_page_has_new_badge(html_text, product):
@@ -162,7 +166,7 @@ async def check_product_new_badge(session, product, semaphore):
 
     async with semaphore:
         try:
-            timeout = aiohttp.ClientTimeout(total=20)
+            timeout = aiohttp.ClientTimeout(total=NEW_PRODUCTS_REQUEST_TIMEOUT)
             async with session.get(
                 url,
                 timeout=timeout,
@@ -192,7 +196,6 @@ async def get_real_new_products(products, force_refresh=False):
     global new_products_cache, new_products_cache_time
 
     now = time.time()
-
     if (
         not force_refresh
         and new_products_cache_time
@@ -200,25 +203,48 @@ async def get_real_new_products(products, force_refresh=False):
     ):
         return new_products_cache
 
-    semaphore = asyncio.Semaphore(8)
+    async with new_products_check_lock:
+        now = time.time()
+        if (
+            not force_refresh
+            and new_products_cache_time
+            and now - new_products_cache_time < NEW_PRODUCTS_CACHE_SECONDS
+        ):
+            return new_products_cache
 
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            check_product_new_badge(session, product, semaphore)
-            for product in products
-        ]
-        results = await asyncio.gather(*tasks)
+        semaphore = asyncio.Semaphore(NEW_PRODUCTS_CONCURRENCY)
 
-    flags = dict(results)
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                asyncio.create_task(
+                    check_product_new_badge(session, product, semaphore)
+                )
+                for product in products
+            ]
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=NEW_PRODUCTS_TOTAL_TIMEOUT,
+            )
 
-    new_products_cache = [
-        product
-        for product in products
-        if flags.get(product_key(product), False)
-    ][:NEW_PRODUCTS_LIMIT]
-    new_products_cache_time = now
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
-    return new_products_cache
+            results = []
+            for task in done:
+                try:
+                    results.append(task.result())
+                except Exception:
+                    logging.exception("New product task error")
+
+        flags = dict(results)
+        new_products_cache = [
+            product for product in products
+            if flags.get(product_key(product), False)
+        ][:NEW_PRODUCTS_LIMIT]
+        new_products_cache_time = time.time()
+        return new_products_cache
 
 def new_products_keyboard(products, page=0):
     page_count = max(
@@ -284,27 +310,41 @@ def new_products_keyboard(products, page=0):
 
 @dp.message(F.text == "🆕 Новинки")
 async def new_products_menu(message: Message):
-    loading = await message.answer(
-        "🔎 Перевіряю реальні позначки «Новинка» на сайті OKVEJ...\n"
-        "Перший запуск може тривати до хвилини."
-    )
-
-    products = await get_in_stock_products()
-    items = await get_real_new_products(products)
-
-    if not items:
-        await loading.edit_text(
-            "🆕 Товарів із позначкою «Новинка» зараз не знайдено."
+    if new_products_check_lock.locked():
+        await message.answer(
+            "⏳ Перевірка новинок уже виконується. Зачекайте приблизно хвилину."
         )
         return
 
-    await loading.edit_text(
-        "🆕 <b>Новинки OKVEJ</b>\n\n"
-        f"Знайдено товарів із позначкою «Новинка»: "
-        f"<b>{len(items)}</b>",
-        parse_mode="HTML",
-        reply_markup=new_products_keyboard(items, 0),
+    loading = await message.answer(
+        "🔎 Перевіряю позначки «Новинка» на сайті OKVEJ...\n"
+        "Перевірка завершиться не пізніше ніж за хвилину."
     )
+
+    try:
+        products = await get_in_stock_products()
+        items = await get_real_new_products(products)
+
+        if not items:
+            await loading.edit_text(
+                "🆕 Товарів із позначкою «Новинка» не знайдено.\n\n"
+                "Перевірка завершена."
+            )
+            return
+
+        await loading.edit_text(
+            "🆕 <b>Новинки OKVEJ</b>\n\n"
+            f"Знайдено товарів із позначкою «Новинка»: <b>{len(items)}</b>",
+            parse_mode="HTML",
+            reply_markup=new_products_keyboard(items, 0),
+        )
+    except Exception:
+        logging.exception("New products menu error")
+        await loading.edit_text(
+            "❌ Не вдалося завершити перевірку новинок. "
+            "Спробуйте ще раз через кілька хвилин."
+        )
+
 
 
 @dp.callback_query(F.data.startswith("new_page:"))
