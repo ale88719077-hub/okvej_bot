@@ -1531,6 +1531,128 @@ async def manual_post_publish(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка публикации: {e}")
 
 
+@dp.message(Command("debug_manufacturers"))
+async def debug_manufacturers(message: Message):
+    """Перевіряє, де саме Horoshop повертає виробника товару."""
+    loading = await message.answer("🔎 Перевіряю виробників у Horoshop API...")
+
+    try:
+        products = await get_in_stock_products(force_refresh=True)
+
+        if not products:
+            await loading.edit_text("❌ Не знайдено товарів у наявності.")
+            return
+
+        sample = products[:30]
+        field_counts = {}
+        manufacturer_examples = []
+
+        candidate_keys = (
+            "proizvoditel",
+            "manufacturer",
+            "brand",
+            "brend",
+            "vendor",
+            "producer",
+            "tm",
+            "torgovayaMarka",
+            "torgovaMarka",
+        )
+
+        for product in sample:
+            title = clean_product_title(localize(product.get("title")))
+            characteristics = product.get("characteristics") or {}
+
+            found = []
+
+            if isinstance(characteristics, dict):
+                for key, raw_value in characteristics.items():
+                    lowered = str(key).lower()
+                    if (
+                        key in candidate_keys
+                        or "proizvod" in lowered
+                        or "brand" in lowered
+                        or "brend" in lowered
+                        or "vendor" in lowered
+                        or "marka" in lowered
+                    ):
+                        value = raw_value
+                        if isinstance(value, dict):
+                            value = value.get("value", value)
+
+                        localized = localize(value).strip()
+                        if localized:
+                            found.append((key, localized))
+                            field_counts[key] = field_counts.get(key, 0) + 1
+
+            top_level_found = []
+
+            for key in candidate_keys:
+                value = product.get(key)
+                localized = localize(value).strip()
+                if localized:
+                    top_level_found.append((key, localized))
+                    field_counts[key] = field_counts.get(key, 0) + 1
+
+            manufacturer_examples.append(
+                (title, found, top_level_found)
+            )
+
+        lines = [
+            "🔎 <b>Перевірка виробників</b>",
+            "",
+            f"Перевірено товарів: <b>{len(sample)}</b>",
+            "",
+        ]
+
+        if field_counts:
+            lines.append("<b>Знайдені поля виробника:</b>")
+            for key, count in sorted(
+                field_counts.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            ):
+                lines.append(f"• <code>{key}</code> — {count}")
+        else:
+            lines.append(
+                "⚠️ У перших 30 товарах не знайдено заповнених полів виробника."
+            )
+
+        lines.extend(["", "<b>Приклади товарів:</b>"])
+
+        for index, (title, characteristic_values, top_values) in enumerate(
+            manufacturer_examples[:20],
+            start=1,
+        ):
+            values = characteristic_values + top_values
+
+            if values:
+                formatted = "; ".join(
+                    f"{key}={value}" for key, value in values
+                )
+            else:
+                formatted = "не знайдено"
+
+            lines.append(
+                f"{index}. {title[:70]}\n"
+                f"   <code>{formatted[:500]}</code>"
+            )
+
+        await loading.edit_text(
+            "\n".join(lines)[:3900],
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    except Exception as error:
+        logging.exception("Manufacturer debug error")
+        await loading.edit_text(
+            "❌ Помилка перевірки виробників:\n"
+            f"<code>{str(error)[:1000]}</code>",
+            parse_mode="HTML",
+        )
+
+
 @dp.message(Command("version"))
 async def version_handler(message: Message):
     await message.answer(
