@@ -24,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "11.0"
-BOT_BUILD = "2026-07-14-favorites-cart-cards-new"
+BOT_VERSION = "11.1"
+BOT_BUILD = "2026-07-14-menu-fix"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -79,14 +79,32 @@ class CheckoutState(StatesGroup):
 
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🍬 Каталог"), KeyboardButton(text="🔍 Пошук товару")],
-        [KeyboardButton(text="🆕 Новинки"), KeyboardButton(text="❤️ Обране")],
-        [KeyboardButton(text="🕒 Переглянуті"), KeyboardButton(text="🛒 Кошик")],
-        [KeyboardButton(text="🚚 Доставка й оплата"), KeyboardButton(text="💬 Менеджер")],
-        [KeyboardButton(text="🌐 Сайт"), KeyboardButton(text="📢 Канал OKVEJ")],
+        [
+            KeyboardButton(text="🍬 Каталог"),
+            KeyboardButton(text="🔍 Пошук товару"),
+        ],
+        [
+            KeyboardButton(text="🆕 Новинки"),
+            KeyboardButton(text="❤️ Обране"),
+        ],
+        [
+            KeyboardButton(text="🕒 Переглянуті"),
+            KeyboardButton(text="🛒 Кошик"),
+        ],
+        [
+            KeyboardButton(text="🚚 Доставка й оплата"),
+            KeyboardButton(text="💬 Менеджер"),
+        ],
+        [
+            KeyboardButton(text="🌐 Сайт"),
+            KeyboardButton(text="📢 Канал OKVEJ"),
+        ],
     ],
     resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="Оберіть дію або введіть повідомлення",
 )
+
 
 
 def localize(value):
@@ -1459,6 +1477,14 @@ async def manual_post_publish(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка публикации: {e}")
 
 
+@dp.message(Command("menu"))
+async def menu_command(message: Message):
+    await message.answer(
+        "✅ Головне меню оновлено.",
+        reply_markup=main_menu,
+    )
+
+
 @dp.message(Command("version"))
 async def version_handler(message: Message):
     await message.answer(
@@ -1468,6 +1494,7 @@ async def version_handler(message: Message):
         "Каталог працює через Horoshop API, показує лише товари "
         "зі статусом «В наявності» та розподіляє товари за категоріями.",
         parse_mode="HTML",
+        reply_markup=main_menu,
     )
 
 
