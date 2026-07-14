@@ -6,6 +6,9 @@ import json
 import time
 import hashlib
 import html
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from urllib.parse import urljoin, urlparse, unquote
 
@@ -24,8 +27,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "11.2"
-BOT_BUILD = "2026-07-14-real-new-badges"
+BOT_VERSION = "11.3"
+BOT_BUILD = "2026-07-14-new-products-by-date"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -56,9 +59,16 @@ product_cache = {}
 catalog_products_cache = []
 catalog_cache_until = 0.0
 
-NEW_BADGE_CACHE_SECONDS = 12 * 60 * 60
-new_badge_cache = {}
-new_badge_cache_time = 0.0
+NEW_PRODUCTS_DAYS = 30
+NEW_PRODUCTS_CACHE_SECONDS = 6 * 60 * 60
+new_products_cache = []
+new_products_cache_time = 0.0
+
+NEW_PRODUCTS_STATE_PATH = Path(
+    os.getenv("NEW_PRODUCTS_STATE_PATH", "/data/okvej_new_products.json")
+)
+if not NEW_PRODUCTS_STATE_PATH.parent.exists():
+    NEW_PRODUCTS_STATE_PATH = Path("okvej_new_products.json")
 
 CATALOG_PAGE_SIZE = 8
 CATALOG_CACHE_SECONDS = 600
@@ -2195,93 +2205,205 @@ NEW_PRODUCTS_LIMIT = 30
 NEW_PRODUCTS_PAGE_SIZE = 8
 
 
-def product_page_has_new_badge(html_text):
-    """
-    Шукає позначку «Новинка» тільки в основному блоці товару.
-    Це не дає рекомендаціям нижче на сторінці створювати хибні збіги.
-    """
-    lowered = html_text.lower()
+def normalize_product_url(url):
+    return str(url or "").split("#", 1)[0].rstrip("/")
 
-    h1_position = lowered.find("<h1")
-    if h1_position >= 0:
-        product_area = html_text[h1_position:h1_position + 30000]
-    else:
-        product_area = html_text[:40000]
 
-    return bool(
-        re.search(
-            r"(>\s*новинка\s*<|"
-            r"class=[\"'][^\"']*(?:label|badge)[^\"']*new[^\"']*[\"']|"
-            r"class=[\"'][^\"']*new[^\"']*(?:label|badge)[^\"']*[\"'])",
-            product_area,
-            flags=re.IGNORECASE,
+def parse_iso_datetime(value):
+    value = str(value or "").strip()
+    if not value:
+        return None
+
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+async def fetch_sitemap_entries(session, url, visited=None):
+    """Повертає {url: lastmod} із sitemap та вкладених sitemap."""
+    if visited is None:
+        visited = set()
+
+    if url in visited or len(visited) > 30:
+        return {}
+
+    visited.add(url)
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with session.get(url, timeout=timeout) as response:
+            if response.status != 200:
+                return {}
+            xml_text = await response.text(errors="ignore")
+    except Exception:
+        logging.exception("Sitemap fetch failed: %s", url)
+        return {}
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+
+    namespace = ""
+    if root.tag.startswith("{"):
+        namespace = root.tag.split("}", 1)[0] + "}"
+
+    entries = {}
+
+    if root.tag.endswith("sitemapindex"):
+        child_urls = []
+        for sitemap in root.findall(f"{namespace}sitemap"):
+            loc = sitemap.findtext(f"{namespace}loc")
+            if loc:
+                child_urls.append(loc.strip())
+
+        for child_url in child_urls[:20]:
+            entries.update(
+                await fetch_sitemap_entries(
+                    session,
+                    child_url,
+                    visited,
+                )
+            )
+        return entries
+
+    for node in root.findall(f"{namespace}url"):
+        loc = node.findtext(f"{namespace}loc")
+        lastmod = node.findtext(f"{namespace}lastmod")
+
+        if loc:
+            entries[normalize_product_url(loc)] = (
+                parse_iso_datetime(lastmod)
+                if lastmod
+                else None
+            )
+
+    return entries
+
+
+def load_new_products_state():
+    try:
+        if NEW_PRODUCTS_STATE_PATH.exists():
+            return json.loads(
+                NEW_PRODUCTS_STATE_PATH.read_text(encoding="utf-8")
+            )
+    except Exception:
+        logging.exception("Failed to read new products state")
+    return {}
+
+
+def save_new_products_state(state):
+    try:
+        NEW_PRODUCTS_STATE_PATH.parent.mkdir(
+            parents=True,
+            exist_ok=True,
         )
-    )
-
-
-async def check_product_new_badge(session, product, semaphore):
-    key = product_key(product)
-    url = product_link(product)
-
-    async with semaphore:
-        try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with session.get(
-                url,
-                timeout=timeout,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (compatible; OKVEJTelegramBot/1.0)"
-                    )
-                },
-            ) as response:
-                if response.status != 200:
-                    return key, False
-
-                html_text = await response.text(errors="ignore")
-                return key, product_page_has_new_badge(html_text)
-
-        except Exception:
-            logging.exception("New badge check failed for %s", url)
-            return key, False
+        NEW_PRODUCTS_STATE_PATH.write_text(
+            json.dumps(
+                state,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        logging.exception("Failed to save new products state")
 
 
 async def get_real_new_products(products, force_refresh=False):
-    global new_badge_cache, new_badge_cache_time
+    """
+    1) Використовує lastmod із sitemap, якщо він є.
+    2) Для товарів без дати запам'ятовує першу появу в боті.
+    Під час першого запуску поточний каталог стає базовим і не вважається новим.
+    """
+    global new_products_cache, new_products_cache_time
 
-    now = time.time()
+    now_timestamp = time.time()
 
     if (
         not force_refresh
-        and new_badge_cache
-        and now - new_badge_cache_time < NEW_BADGE_CACHE_SECONDS
+        and new_products_cache
+        and now_timestamp - new_products_cache_time < NEW_PRODUCTS_CACHE_SECONDS
     ):
-        return [
-            product
-            for product in products
-            if new_badge_cache.get(product_key(product), False)
-        ][:NEW_PRODUCTS_LIMIT]
+        return new_products_cache
 
-    semaphore = asyncio.Semaphore(10)
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=NEW_PRODUCTS_DAYS)
 
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            check_product_new_badge(session, product, semaphore)
-            for product in products
-        ]
-        results = await asyncio.gather(*tasks)
-
-    new_badge_cache = dict(results)
-    new_badge_cache_time = now
-
-    new_products = [
-        product
-        for product in products
-        if new_badge_cache.get(product_key(product), False)
+    sitemap_entries = {}
+    sitemap_urls = [
+        urljoin(SITE_URL, "sitemap.xml"),
+        urljoin(SITE_URL, "sitemap_index.xml"),
     ]
 
-    return new_products[:NEW_PRODUCTS_LIMIT]
+    async with aiohttp.ClientSession(
+        headers={"User-Agent": "OKVEJTelegramBot/1.0"}
+    ) as session:
+        for sitemap_url in sitemap_urls:
+            entries = await fetch_sitemap_entries(
+                session,
+                sitemap_url,
+            )
+            if entries:
+                sitemap_entries.update(entries)
+                break
 
+    state = load_new_products_state()
+    first_run = not bool(state)
+    changed = False
+    result = []
+
+    for product in products:
+        key = product_key(product)
+        product_url = normalize_product_url(product_link(product))
+        sitemap_date = sitemap_entries.get(product_url)
+
+        # Сначала используем дату из sitemap.
+        if sitemap_date is not None:
+            if sitemap_date >= threshold:
+                result.append(product)
+            continue
+
+        # Если sitemap даты не дал — используем first_seen.
+        if key not in state:
+            state[key] = now.isoformat()
+            changed = True
+
+            # При первом запуске создаём базу без массовой отметки всех товаров.
+            if not first_run:
+                result.append(product)
+            continue
+
+        first_seen = parse_iso_datetime(state.get(key))
+        if first_seen and first_seen >= threshold and not first_run:
+            result.append(product)
+
+    if changed:
+        save_new_products_state(state)
+
+    # Сначала более свежие даты sitemap/first_seen.
+    def product_date(product):
+        product_url = normalize_product_url(product_link(product))
+        sitemap_date = sitemap_entries.get(product_url)
+        if sitemap_date:
+            return sitemap_date
+
+        first_seen = parse_iso_datetime(
+            state.get(product_key(product))
+        )
+        return first_seen or datetime.min.replace(tzinfo=timezone.utc)
+
+    result.sort(key=product_date, reverse=True)
+
+    new_products_cache = result[:NEW_PRODUCTS_LIMIT]
+    new_products_cache_time = now_timestamp
+    return new_products_cache
 
 def new_products_keyboard(products, page=0):
     page_count = max(
@@ -2332,7 +2454,7 @@ def new_products_keyboard(products, page=0):
     rows.append(navigation)
     rows.append([
         InlineKeyboardButton(
-            text="🔄 Оновити новинки",
+            text="🔄 Оновити дати новинок",
             callback_data="new_refresh",
         )
     ])
@@ -2348,7 +2470,7 @@ def new_products_keyboard(products, page=0):
 @dp.message(F.text == "🆕 Новинки")
 async def new_products_menu(message: Message):
     loading = await message.answer(
-        "🔎 Перевіряю позначки «Новинка» на сайті OKVEJ...\n"
+        "🔎 Перевіряю дати товарів на сайті OKVEJ...\n"
         "Перший запуск може тривати до хвилини."
     )
 
@@ -2357,13 +2479,13 @@ async def new_products_menu(message: Message):
 
     if not items:
         await loading.edit_text(
-            "🆕 Товарів із позначкою «Новинка» зараз не знайдено."
+            "🆕 Нових товарів за останні 30 днів зараз не знайдено."
         )
         return
 
     await loading.edit_text(
         "🆕 <b>Новинки OKVEJ</b>\n\n"
-        f"Знайдено товарів із позначкою «Новинка»: "
+        f"Знайдено нових товарів за останні {NEW_PRODUCTS_DAYS} днів: "
         f"<b>{len(items)}</b>",
         parse_mode="HTML",
         reply_markup=new_products_keyboard(items, 0),
@@ -2385,7 +2507,7 @@ async def new_products_page(callback: CallbackQuery):
 @dp.callback_query(F.data == "new_refresh")
 async def new_products_refresh(callback: CallbackQuery):
     await callback.answer(
-        "Оновлюю позначки новинок. Це може тривати до хвилини.",
+        "Оновлюю дати новинок. Це може тривати до хвилини.",
         show_alert=True,
     )
 
@@ -2394,13 +2516,13 @@ async def new_products_refresh(callback: CallbackQuery):
 
     if not items:
         await callback.message.edit_text(
-            "🆕 Товарів із позначкою «Новинка» зараз не знайдено."
+            "🆕 Нових товарів за останні 30 днів зараз не знайдено."
         )
         return
 
     await callback.message.edit_text(
         "🆕 <b>Новинки OKVEJ</b>\n\n"
-        f"Знайдено товарів із позначкою «Новинка»: "
+        f"Знайдено нових товарів за останні {NEW_PRODUCTS_DAYS} днів: "
         f"<b>{len(items)}</b>",
         parse_mode="HTML",
         reply_markup=new_products_keyboard(items, 0),
