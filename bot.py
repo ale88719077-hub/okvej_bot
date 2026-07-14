@@ -24,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "11.6"
-BOT_BUILD = "2026-07-14-restored-full-bot-new-products"
+BOT_VERSION = "11.7"
+BOT_BUILD = "2026-07-14-latest-arrivals"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -84,7 +84,7 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🔍 Пошук товару"),
         ],
         [
-            KeyboardButton(text="🆕 Новинки"),
+            KeyboardButton(text="🆕 Останні надходження"),
             KeyboardButton(text="❤️ Обране"),
         ],
         [
@@ -134,206 +134,28 @@ def price_number(product):
         return 0.0
 
 
-NEW_PRODUCTS_LIMIT = 50
-NEW_PRODUCTS_PAGE_SIZE = 8
-NEW_PRODUCTS_CACHE_SECONDS = 6 * 60 * 60
-NEW_PRODUCTS_TOTAL_TIMEOUT = 55
-NEW_PRODUCTS_REQUEST_TIMEOUT = 8
-NEW_PRODUCTS_CONCURRENCY = 30
-
-new_products_cache = []
-new_products_cache_time = 0.0
-new_products_check_lock = asyncio.Lock()
+LATEST_PRODUCTS_LIMIT = 30
+LATEST_PRODUCTS_PAGE_SIZE = 8
 
 
-def product_page_has_new_badge(html_text, product):
-    """Ищет метку «Новинка» возле основной карточки товара."""
-    article = str(product.get("article") or "").strip()
-    title = clean_product_title(localize(product.get("title")))
-    lowered = html_text.lower()
-    regions = []
-
-    if article:
-        for match in list(
-            re.finditer(re.escape(article.lower()), lowered)
-        )[:3]:
-            position = match.start()
-            regions.append(
-                html_text[
-                    max(0, position - 7000):
-                    min(len(html_text), position + 11000)
-                ]
-            )
-
-    if title:
-        position = lowered.find(title.lower())
-        if position >= 0:
-            regions.append(
-                html_text[
-                    max(0, position - 7000):
-                    min(len(html_text), position + 15000)
-                ]
-            )
-
-    h1_position = lowered.find("<h1")
-    if h1_position >= 0:
-        regions.append(
-            html_text[
-                max(0, h1_position - 4000):
-                min(len(html_text), h1_position + 20000)
-            ]
-        )
-
-    regions.append(html_text[:45000])
-
-    recommendation_markers = (
-        "с этим товаром покупают",
-        "з цим товаром купують",
-        "рекомендуем",
-        "рекомендуємо",
-        "похожие товары",
-        "схожі товари",
-        "просмотренные товары",
-        "переглянуті товари",
-    )
-
-    patterns = (
-        r">\s*новинка\s*<",
-        r"class=[\"'][^\"']*(?:badge|label|sticker|product-label)"
-        r"[^\"']*[\"'][^>]*>[^<]{0,80}новинка",
-        r"class=[\"'][^\"']*(?:new|novelty)[^\"']*[\"']",
-    )
-
-    for region in regions:
-        region_lower = region.lower()
-        cuts = [
-            region_lower.find(item)
-            for item in recommendation_markers
-            if region_lower.find(item) >= 0
-        ]
-        if cuts:
-            region = region[:min(cuts)]
-
-        for pattern in patterns:
-            if re.search(pattern, region, flags=re.IGNORECASE):
-                return True
-
-    return False
+def latest_arrivals(products):
+    """
+    Horoshop API не повертає дату створення товару.
+    Тому показуємо останні товари у порядку відповіді API.
+    """
+    return list(reversed(products))[:LATEST_PRODUCTS_LIMIT]
 
 
-async def check_product_new_badge(session, product, semaphore):
-    key = product_key(product)
-    url = product_link(product)
-
-    async with semaphore:
-        try:
-            timeout = aiohttp.ClientTimeout(
-                total=NEW_PRODUCTS_REQUEST_TIMEOUT
-            )
-            async with session.get(
-                url,
-                timeout=timeout,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 Chrome/126 Safari/537.36"
-                    ),
-                    "Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.8",
-                },
-            ) as response:
-                if response.status != 200:
-                    return key, False
-
-                html_text = await response.text(errors="ignore")
-                return key, product_page_has_new_badge(
-                    html_text,
-                    product,
-                )
-        except Exception:
-            return key, False
-
-
-async def get_real_new_products(products, force_refresh=False):
-    global new_products_cache, new_products_cache_time
-
-    now = time.time()
-    if (
-        not force_refresh
-        and new_products_cache_time
-        and now - new_products_cache_time < NEW_PRODUCTS_CACHE_SECONDS
-    ):
-        return new_products_cache
-
-    async with new_products_check_lock:
-        now = time.time()
-        if (
-            not force_refresh
-            and new_products_cache_time
-            and now - new_products_cache_time < NEW_PRODUCTS_CACHE_SECONDS
-        ):
-            return new_products_cache
-
-        semaphore = asyncio.Semaphore(NEW_PRODUCTS_CONCURRENCY)
-
-        async with aiohttp.ClientSession() as session:
-            tasks = [
-                asyncio.create_task(
-                    check_product_new_badge(
-                        session,
-                        product,
-                        semaphore,
-                    )
-                )
-                for product in products
-            ]
-
-            done, pending = await asyncio.wait(
-                tasks,
-                timeout=NEW_PRODUCTS_TOTAL_TIMEOUT,
-            )
-
-            for task in pending:
-                task.cancel()
-
-            if pending:
-                await asyncio.gather(
-                    *pending,
-                    return_exceptions=True,
-                )
-
-            results = []
-            for task in done:
-                try:
-                    results.append(task.result())
-                except Exception:
-                    logging.exception("New product task error")
-
-        flags = dict(results)
-        new_products_cache = [
-            product
-            for product in products
-            if flags.get(product_key(product), False)
-        ][:NEW_PRODUCTS_LIMIT]
-        new_products_cache_time = time.time()
-
-        logging.info(
-            "New products scan: completed=%s timed_out=%s found=%s",
-            len(done),
-            len(pending),
-            len(new_products_cache),
-        )
-        return new_products_cache
-
-
-def new_products_keyboard(products, page=0):
+def latest_arrivals_keyboard(products, page=0):
     page_count = max(
         1,
-        (len(products) + NEW_PRODUCTS_PAGE_SIZE - 1)
-        // NEW_PRODUCTS_PAGE_SIZE,
+        (len(products) + LATEST_PRODUCTS_PAGE_SIZE - 1)
+        // LATEST_PRODUCTS_PAGE_SIZE,
     )
     page = max(0, min(page, page_count - 1))
-    start = page * NEW_PRODUCTS_PAGE_SIZE
-    page_items = products[start:start + NEW_PRODUCTS_PAGE_SIZE]
+
+    start = page * LATEST_PRODUCTS_PAGE_SIZE
+    page_items = products[start:start + LATEST_PRODUCTS_PAGE_SIZE]
 
     rows = []
 
@@ -346,7 +168,7 @@ def new_products_keyboard(products, page=0):
         rows.append([
             InlineKeyboardButton(
                 text=f"🆕 {title[:36]} — {price:g} грн",
-                callback_data=f"new_product:{key}:{page}",
+                callback_data=f"latest_product:{key}:{page}",
             )
         ])
 
@@ -356,7 +178,7 @@ def new_products_keyboard(products, page=0):
         navigation.append(
             InlineKeyboardButton(
                 text="⬅️ Попередня",
-                callback_data=f"new_page:{page - 1}",
+                callback_data=f"latest_page:{page - 1}",
             )
         )
 
@@ -371,15 +193,15 @@ def new_products_keyboard(products, page=0):
         navigation.append(
             InlineKeyboardButton(
                 text="Наступна ➡️",
-                callback_data=f"new_page:{page + 1}",
+                callback_data=f"latest_page:{page + 1}",
             )
         )
 
     rows.append(navigation)
     rows.append([
         InlineKeyboardButton(
-            text="🔄 Оновити новинки",
-            callback_data="new_refresh",
+            text="🔄 Оновити список",
+            callback_data="latest_refresh",
         )
     ])
     rows.append([
@@ -2432,101 +2254,74 @@ async def recent_product(callback: CallbackQuery):
 
 
 @dp.message(F.text == "🆕 Новинки")
-async def new_products_menu(message: Message):
-    if new_products_check_lock.locked():
-        await message.answer(
-            "⏳ Перевірка новинок уже виконується. "
-            "Зачекайте приблизно хвилину."
-        )
-        return
+async def old_new_products_button(message: Message):
+    await latest_arrivals_menu(message)
 
-    loading = await message.answer(
-        "🔎 Перевіряю позначки «Новинка» на сайті OKVEJ...\n"
-        "Перевірка завершиться не пізніше ніж за хвилину."
-    )
 
+@dp.message(F.text == "🆕 Останні надходження")
+async def latest_arrivals_menu(message: Message):
     try:
         products = await get_in_stock_products()
-        items = await get_real_new_products(products)
+        items = latest_arrivals(products)
 
         if not items:
-            await loading.edit_text(
-                "🆕 Товарів із позначкою «Новинка» не знайдено.\n\n"
-                "Перевірка завершена."
+            await message.answer(
+                "🆕 Нових надходжень зараз не знайдено."
             )
             return
 
-        await loading.edit_text(
-            "🆕 <b>Новинки OKVEJ</b>\n\n"
-            f"Знайдено товарів: <b>{len(items)}</b>",
+        await message.answer(
+            "🆕 <b>Останні надходження OKVEJ</b>\n\n"
+            f"Показуємо останні <b>{len(items)}</b> товарів "
+            "у порядку Horoshop API.",
             parse_mode="HTML",
-            reply_markup=new_products_keyboard(items, 0),
+            reply_markup=latest_arrivals_keyboard(items, 0),
         )
 
     except Exception:
-        logging.exception("New products menu error")
-        await loading.edit_text(
-            "❌ Не вдалося завершити перевірку новинок. "
-            "Спробуйте ще раз через кілька хвилин."
+        logging.exception("Latest arrivals menu error")
+        await message.answer(
+            "❌ Не вдалося завантажити останні надходження."
         )
 
 
-@dp.callback_query(F.data.startswith("new_page:"))
-async def new_products_page(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("latest_page:"))
+async def latest_arrivals_page(callback: CallbackQuery):
     page = int(callback.data.split(":", 1)[1])
     products = await get_in_stock_products()
-    items = await get_real_new_products(products)
+    items = latest_arrivals(products)
 
     await callback.message.edit_reply_markup(
-        reply_markup=new_products_keyboard(items, page),
+        reply_markup=latest_arrivals_keyboard(items, page),
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data == "new_refresh")
-async def new_products_refresh(callback: CallbackQuery):
-    if new_products_check_lock.locked():
-        await callback.answer(
-            "Перевірка вже виконується. Зачекайте приблизно хвилину.",
-            show_alert=True,
-        )
-        return
-
-    await callback.answer(
-        "Оновлюю новинки. Це триватиме не більше хвилини.",
-        show_alert=True,
-    )
-
+@dp.callback_query(F.data == "latest_refresh")
+async def latest_arrivals_refresh(callback: CallbackQuery):
     try:
         products = await get_in_stock_products(force_refresh=True)
-        items = await get_real_new_products(
-            products,
-            force_refresh=True,
-        )
-
-        if not items:
-            await callback.message.edit_text(
-                "🆕 Товарів із позначкою «Новинка» не знайдено.\n\n"
-                "Перевірка завершена."
-            )
-            return
+        items = latest_arrivals(products)
 
         await callback.message.edit_text(
-            "🆕 <b>Новинки OKVEJ</b>\n\n"
-            f"Знайдено товарів: <b>{len(items)}</b>",
+            "🆕 <b>Останні надходження OKVEJ</b>\n\n"
+            f"Показуємо останні <b>{len(items)}</b> товарів "
+            "у порядку Horoshop API.",
             parse_mode="HTML",
-            reply_markup=new_products_keyboard(items, 0),
+            reply_markup=latest_arrivals_keyboard(items, 0),
         )
+        await callback.answer("Список оновлено")
 
     except Exception:
-        logging.exception("New products refresh error")
-        await callback.message.edit_text(
-            "❌ Не вдалося завершити перевірку новинок."
+        logging.exception("Latest arrivals refresh error")
+        await callback.answer(
+            "Не вдалося оновити список.",
+            show_alert=True,
         )
 
 
-@dp.callback_query(F.data.startswith("new_product:"))
-async def new_product_card(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("latest_product:"))
+async def latest_arrival_product(callback: CallbackQuery):
     _, key, page_text = callback.data.split(":", 2)
     product = product_cache.get(key)
 
@@ -2548,6 +2343,12 @@ async def new_product_card(callback: CallbackQuery):
         )
         return
 
+    recent = user_recent[callback.from_user.id]
+    if key in recent:
+        recent.remove(key)
+    recent.insert(0, key)
+    del recent[10:]
+
     image_url = get_image_url(product)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
@@ -2563,8 +2364,8 @@ async def new_product_card(callback: CallbackQuery):
             url=product_link(product),
         )],
         [InlineKeyboardButton(
-            text="⬅️ До новинок",
-            callback_data=f"new_page:{page_text}",
+            text="⬅️ До останніх надходжень",
+            callback_data=f"latest_page:{page_text}",
         )],
     ])
 
@@ -2583,6 +2384,7 @@ async def new_product_card(callback: CallbackQuery):
         )
 
     await callback.answer()
+
 
 
 @dp.message(F.text == "🛒 Кошик")
