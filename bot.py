@@ -24,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "7.0"
-BOT_BUILD = "2026-07-14-product-card-cart"
+BOT_VERSION = "8.0"
+BOT_BUILD = "2026-07-14-clean-cards-favorites"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -50,6 +50,7 @@ shop = HoroshopAPI(
 
 # Корзины хранятся в памяти. После перезапуска Railway они очищаются.
 user_carts = defaultdict(dict)
+user_favorites = defaultdict(set)
 product_cache = {}
 catalog_products_cache = []
 catalog_cache_until = 0.0
@@ -547,7 +548,7 @@ def categories_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
         )
     navigation.append(
         InlineKeyboardButton(
-            text=f"{page + 1}/{page_count}",
+            text=f"Сторінка {page + 1}/{page_count}",
             callback_data="catalog_noop",
         )
     )
@@ -612,7 +613,7 @@ def catalog_page_keyboard(products, category_id: str, page: int) -> InlineKeyboa
         )
     navigation.append(
         InlineKeyboardButton(
-            text=f"{page + 1}/{page_count}",
+            text=f"Сторінка {page + 1}/{page_count}",
             callback_data="catalog_noop",
         )
     )
@@ -847,6 +848,30 @@ async def load_product_from_page(link):
     }
 
 
+def clean_product_title(value):
+    title = str(value or "").strip()
+
+    prefixes = (
+        "copy_", "copy-", "copy ",
+        "копія_", "копия_", "копія ", "копия ",
+        "cory_", "сору_",
+    )
+
+    lowered = title.lower()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                title = title[len(prefix):].lstrip(" _-")
+                lowered = title.lower()
+                changed = True
+                break
+
+    title = re.sub(r"\s+", " ", title).strip()
+    return title or "Товар"
+
+
 def clean_product_description(value):
     value = html.unescape(str(value or ""))
     value = re.sub(r"<[^>]+>", " ", value)
@@ -862,7 +887,7 @@ def product_weight(product):
 
 
 def product_text(product):
-    title = localize(product.get("title")) or "Товар"
+    title = clean_product_title(localize(product.get("title")))
     price = price_number(product)
     article = product.get("article") or "—"
     weight = product_weight(product)
@@ -899,6 +924,7 @@ def product_keyboard(product):
     product_cache[key] = product
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Додати в кошик", callback_data=f"add:{key}")],
+        [InlineKeyboardButton(text="❤️ В обране", callback_data=f"favorite_add:{key}")],
         [InlineKeyboardButton(text="🌐 Відкрити на сайті", url=product_link(product))],
         [InlineKeyboardButton(text="🛍 Перейти до кошика", callback_data="open_cart")],
     ])
@@ -925,7 +951,7 @@ def cart_view(user_id):
             price = price_number(product)
             subtotal = price * qty
             total += subtotal
-            title = localize(product.get("title")) or "Товар"
+            title = clean_product_title(localize(product.get("title")))
 
             lines.append(
                 f"{number}. <b>{title}</b>\n"
@@ -943,7 +969,7 @@ def cart_view(user_id):
         if not product:
             continue
 
-        title = localize(product.get("title")) or "Товар"
+        title = clean_product_title(localize(product.get("title")))
         rows.append([
             InlineKeyboardButton(text="➖", callback_data=f"cart_minus:{key}"),
             InlineKeyboardButton(
@@ -994,7 +1020,94 @@ async def add_to_cart(callback: CallbackQuery):
         await callback.answer("Товару вже немає в наявності.", show_alert=True)
         return
     user_carts[callback.from_user.id][key] = user_carts[callback.from_user.id].get(key, 0) + 1
-    await callback.answer("✅ Додано в кошик")
+
+    quick_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🛍 Перейти до кошика",
+            callback_data="open_cart",
+        )],
+        [InlineKeyboardButton(
+            text="🍬 Продовжити покупки",
+            callback_data="catalog_categories",
+        )],
+    ])
+
+    await callback.message.answer(
+        "✅ <b>Товар додано до кошика</b>",
+        parse_mode="HTML",
+        reply_markup=quick_keyboard,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("favorite_add:"))
+async def favorite_add(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    product = product_cache.get(key)
+
+    if not product:
+        products = await get_in_stock_products()
+        product = next(
+            (item for item in products if product_key(item) == key),
+            None,
+        )
+
+    if not product:
+        await callback.answer("Товар не знайдено.", show_alert=True)
+        return
+
+    user_favorites[callback.from_user.id].add(key)
+    await callback.answer("Додано в обране ❤️", show_alert=True)
+
+
+@dp.message(Command("favorites"))
+async def favorites_command(message: Message):
+    keys = user_favorites.get(message.from_user.id, set())
+
+    if not keys:
+        await message.answer(
+            "❤️ <b>Обране порожнє</b>\n\n"
+            "Додавайте товари кнопкою «В обране».",
+            parse_mode="HTML",
+        )
+        return
+
+    rows = []
+    lines = ["❤️ <b>Обрані товари</b>", ""]
+
+    for index, key in enumerate(list(keys)[:20], start=1):
+        product = product_cache.get(key)
+        if not product:
+            continue
+
+        title = clean_product_title(localize(product.get("title")))
+        price = price_number(product)
+        lines.append(f"{index}. {title} — <b>{price:g} грн</b>")
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🛒 {title[:32]}",
+                callback_data=f"add:{key}",
+            )
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                text="🗑 Видалити з обраного",
+                callback_data=f"favorite_remove:{key}",
+            )
+        ])
+
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@dp.callback_query(F.data.startswith("favorite_remove:"))
+async def favorite_remove(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    user_favorites[callback.from_user.id].discard(key)
+    await callback.answer("Видалено з обраного")
 
 
 @dp.callback_query(F.data == "open_cart")
@@ -1535,12 +1648,20 @@ async def catalog_product(callback: CallbackQuery):
         page = int(page_text)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
-                text="➕ Додати в кошик",
+                text="🛒 Додати в кошик",
                 callback_data=f"add:{key}",
             )],
             [InlineKeyboardButton(
-                text="🛒 Купити на сайті",
+                text="❤️ В обране",
+                callback_data=f"favorite_add:{key}",
+            )],
+            [InlineKeyboardButton(
+                text="🌐 Відкрити на сайті",
                 url=product_link(product),
+            )],
+            [InlineKeyboardButton(
+                text="🛍 Перейти до кошика",
+                callback_data="open_cart",
             )],
             [InlineKeyboardButton(
                 text="⬅️ Назад до категорії",
