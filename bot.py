@@ -24,8 +24,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "8.0"
-BOT_BUILD = "2026-07-14-clean-cards-favorites"
+BOT_VERSION = "9.0"
+BOT_BUILD = "2026-07-14-manufacturer-filter"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -472,6 +472,92 @@ def category_name(product):
         or category_from_title(product)
         or "Інші товари"
     )
+
+
+def manufacturer_name(product):
+    """Повертає виробника з characteristics.proizvoditel."""
+    characteristics = product.get("characteristics") or {}
+    if not isinstance(characteristics, dict):
+        return "Інші виробники"
+
+    manufacturer = (
+        characteristics.get("proizvoditel")
+        or characteristics.get("manufacturer")
+        or characteristics.get("brand")
+        or characteristics.get("brend")
+    )
+
+    if isinstance(manufacturer, dict):
+        value = manufacturer.get("value", manufacturer)
+        name = localize(value).strip()
+    else:
+        name = localize(manufacturer).strip()
+
+    return name or "Інші виробники"
+
+
+def manufacturer_key(name: str) -> str:
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
+
+
+def grouped_manufacturers(products):
+    groups = {}
+    for product in products:
+        name = manufacturer_name(product)
+        groups.setdefault(name, []).append(product)
+    return dict(sorted(groups.items(), key=lambda item: (item[0] == "Інші виробники", item[0].lower())))
+
+
+def find_manufacturer(products, key: str):
+    for name, items in grouped_manufacturers(products).items():
+        if manufacturer_key(name) == key:
+            return name, items
+    return None, []
+
+
+MANUFACTURER_PAGE_SIZE = 12
+
+
+def manufacturers_keyboard(products, category_id: str, page: int = 0) -> InlineKeyboardMarkup:
+    groups = list(grouped_manufacturers(products).items())
+    total = len(groups)
+    page_count = max(1, (total + MANUFACTURER_PAGE_SIZE - 1) // MANUFACTURER_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * MANUFACTURER_PAGE_SIZE
+    page_items = groups[start:start + MANUFACTURER_PAGE_SIZE]
+
+    rows = []
+    for name, items in page_items:
+        rows.append([InlineKeyboardButton(
+            text=f"🏭 {name[:40]} ({len(items)})",
+            callback_data=f"manufacturer:{category_id}:{manufacturer_key(name)}:0",
+        )])
+
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(
+            text="⬅️ Попередня",
+            callback_data=f"manufacturers_page:{category_id}:{page - 1}",
+        ))
+    navigation.append(InlineKeyboardButton(
+        text=f"Сторінка {page + 1}/{page_count}",
+        callback_data="catalog_noop",
+    ))
+    if page + 1 < page_count:
+        navigation.append(InlineKeyboardButton(
+            text="Наступна ➡️",
+            callback_data=f"manufacturers_page:{category_id}:{page + 1}",
+        ))
+    rows.append(navigation)
+    rows.append([InlineKeyboardButton(
+        text="📄 Показати всі товари",
+        callback_data=f"catalog_page:{category_id}:0",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="⬅️ До категорій",
+        callback_data="catalog_categories",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def category_key(name: str) -> str:
@@ -1445,108 +1531,6 @@ async def manual_post_publish(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка публикации: {e}")
 
 
-@dp.message(Command("debug_tags"))
-async def debug_tags(message: Message):
-    """Показує, чи повертає Horoshop API теги або службові ознаки товару."""
-    loading = await message.answer("🔎 Перевіряю поля тегів у Horoshop API...")
-
-    try:
-        products = await get_all_products(max_items=100, batch_size=100)
-
-        if not products:
-            await loading.edit_text("❌ API не повернув жодного товару.")
-            return
-
-        candidate_fields = (
-            "tags",
-            "tag",
-            "labels",
-            "label",
-            "badges",
-            "badge",
-            "groups",
-            "group",
-            "collections",
-            "collection",
-            "features",
-            "characteristics",
-            "params",
-            "parameters",
-            "special",
-            "hit",
-            "is_hit",
-            "bestseller",
-            "is_bestseller",
-            "new",
-            "is_new",
-            "sale",
-            "is_sale",
-        )
-
-        field_counts = {}
-        examples = {}
-
-        for product in products:
-            for field in candidate_fields:
-                value = product.get(field)
-                if value not in (None, "", [], {}, False):
-                    field_counts[field] = field_counts.get(field, 0) + 1
-                    examples.setdefault(field, value)
-
-        lines = [
-            "🔎 <b>Перевірка тегів Horoshop API</b>",
-            "",
-            f"Перевірено товарів: <b>{len(products)}</b>",
-            "",
-        ]
-
-        if not field_counts:
-            lines.extend([
-                "⚠️ У перших 100 товарах не знайдено полів тегів,",
-                "позначок «хіт», «новинка» або «акція».",
-                "",
-                "Ймовірно, API їх не повертає у поточному експорті.",
-            ])
-        else:
-            lines.append("<b>Знайдені поля:</b>")
-            for field, count in sorted(
-                field_counts.items(),
-                key=lambda item: item[1],
-                reverse=True,
-            ):
-                sample = json.dumps(
-                    examples[field],
-                    ensure_ascii=False,
-                    default=str,
-                )
-                lines.append(
-                    f"• <code>{field}</code> — {count} товарів\n"
-                    f"  приклад: <code>{sample[:500]}</code>"
-                )
-
-        # Also show all top-level keys of the first product.
-        first_keys = sorted(products[0].keys())
-        lines.extend([
-            "",
-            "<b>Поля першого товару:</b>",
-            "<code>" + ", ".join(first_keys)[:1800] + "</code>",
-        ])
-
-        await loading.edit_text(
-            "\n".join(lines)[:3900],
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-
-    except Exception as error:
-        logging.exception("Tags debug error")
-        await loading.edit_text(
-            "❌ Помилка перевірки API:\n"
-            f"<code>{str(error)[:1000]}</code>",
-            parse_mode="HTML",
-        )
-
-
 @dp.message(Command("version"))
 async def version_handler(message: Message):
     await message.answer(
@@ -1688,12 +1672,152 @@ async def catalog_category(callback: CallbackQuery):
         await callback.answer("Категорію не знайдено.", show_alert=True)
         return
 
+    manufacturer_count = len(grouped_manufacturers(category_products))
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"🏭 За виробником ({manufacturer_count})",
+            callback_data=f"manufacturers_page:{category_id}:0",
+        )],
+        [InlineKeyboardButton(
+            text=f"📄 Показати всі ({len(category_products)})",
+            callback_data=f"catalog_page:{category_id}:0",
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ До категорій",
+            callback_data="catalog_categories",
+        )],
+    ])
+
     await callback.message.edit_text(
-        catalog_page_text(title, category_products, 0),
+        f"🍬 <b>{title}</b>\n\n"
+        f"✅ У наявності: <b>{len(category_products)}</b>\n"
+        f"🏭 Виробників: <b>{manufacturer_count}</b>\n\n"
+        "Оберіть спосіб перегляду:",
         parse_mode="HTML",
-        reply_markup=catalog_page_keyboard(category_products, category_id, 0),
+        reply_markup=keyboard,
     )
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("manufacturers_page:"))
+async def manufacturers_page(callback: CallbackQuery):
+    try:
+        _, category_id, page_text = callback.data.split(":", 2)
+        page = int(page_text)
+        products = await get_in_stock_products()
+        title, category_products = find_category(products, category_id)
+        if not category_products:
+            await callback.answer("Категорію не знайдено.", show_alert=True)
+            return
+
+        manufacturers = grouped_manufacturers(category_products)
+        await callback.message.edit_text(
+            f"🍬 <b>{title}</b>\n\n"
+            f"🏭 Виробників: <b>{len(manufacturers)}</b>\n\n"
+            "Оберіть виробника:",
+            parse_mode="HTML",
+            reply_markup=manufacturers_keyboard(category_products, category_id, page),
+        )
+        await callback.answer()
+    except Exception:
+        logging.exception("Manufacturers page error")
+        await callback.answer("Не вдалося відкрити список виробників.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("manufacturer:"))
+async def manufacturer_products(callback: CallbackQuery):
+    try:
+        _, category_id, manufacturer_id, page_text = callback.data.split(":", 3)
+        page = int(page_text)
+        products = await get_in_stock_products()
+        category_title, category_products = find_category(products, category_id)
+        manufacturer_title, manufacturer_items = find_manufacturer(category_products, manufacturer_id)
+        if not manufacturer_items:
+            await callback.answer("Виробника не знайдено.", show_alert=True)
+            return
+
+        total = len(manufacturer_items)
+        page_count = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
+        page = max(0, min(page, page_count - 1))
+        start = page * CATALOG_PAGE_SIZE
+        page_items = manufacturer_items[start:start + CATALOG_PAGE_SIZE]
+
+        rows = []
+        for product in page_items:
+            key = product_key(product)
+            product_cache[key] = product
+            title = clean_product_title(localize(product.get("title")))
+            price = price_number(product)
+            rows.append([InlineKeyboardButton(
+                text=f"{title[:39]} — {price:g} грн",
+                callback_data=f"manufacturer_product:{key}:{category_id}:{manufacturer_id}:{page}",
+            )])
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="⬅️ Попередня",
+                callback_data=f"manufacturer:{category_id}:{manufacturer_id}:{page - 1}",
+            ))
+        nav.append(InlineKeyboardButton(text=f"Сторінка {page + 1}/{page_count}", callback_data="catalog_noop"))
+        if page + 1 < page_count:
+            nav.append(InlineKeyboardButton(
+                text="Наступна ➡️",
+                callback_data=f"manufacturer:{category_id}:{manufacturer_id}:{page + 1}",
+            ))
+        rows.append(nav)
+        rows.append([InlineKeyboardButton(
+            text="⬅️ До виробників",
+            callback_data=f"manufacturers_page:{category_id}:0",
+        )])
+        rows.append([InlineKeyboardButton(text="⬅️ До категорій", callback_data="catalog_categories")])
+
+        await callback.message.edit_text(
+            f"🏭 <b>{manufacturer_title}</b>\n"
+            f"🍬 Категорія: <b>{category_title}</b>\n\n"
+            f"✅ У наявності: <b>{total}</b>\n"
+            f"📄 Сторінка: <b>{page + 1} із {page_count}</b>\n\n"
+            "Оберіть товар:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        await callback.answer()
+    except Exception:
+        logging.exception("Manufacturer products error")
+        await callback.answer("Не вдалося відкрити товари виробника.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("manufacturer_product:"))
+async def manufacturer_product(callback: CallbackQuery):
+    try:
+        _, key, category_id, manufacturer_id, page_text = callback.data.split(":", 4)
+        product = product_cache.get(key)
+        if not product:
+            products = await get_in_stock_products()
+            product = next((item for item in products if product_key(item) == key), None)
+        if not product or not is_in_stock(product):
+            await callback.answer("Цього товару вже немає в наявності.", show_alert=True)
+            return
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 Додати в кошик", callback_data=f"add:{key}")],
+            [InlineKeyboardButton(text="❤️ В обране", callback_data=f"favorite_add:{key}")],
+            [InlineKeyboardButton(text="🌐 Відкрити на сайті", url=product_link(product))],
+            [InlineKeyboardButton(
+                text="⬅️ До товарів виробника",
+                callback_data=f"manufacturer:{category_id}:{manufacturer_id}:{page_text}",
+            )],
+        ])
+
+        image_url = get_image_url(product)
+        if image_url:
+            await callback.message.answer_photo(photo=image_url, caption=product_text(product), parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await callback.message.answer(product_text(product), parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    except Exception:
+        logging.exception("Manufacturer product card error")
+        await callback.answer("Не вдалося відкрити товар.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("catalog_page:"))
