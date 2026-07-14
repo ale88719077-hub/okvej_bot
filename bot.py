@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "12.0"
-BOT_BUILD = "2026-07-14-manual-new-products-first-word-categories"
+BOT_VERSION = "12.1"
+BOT_BUILD = "2026-07-15-admin-id-diagnostic"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -40,6 +40,17 @@ BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
 ADMIN_USER_ID = (os.getenv("ADMIN_USER_ID") or MANAGER_CHAT_ID or "").strip()
+
+logging.info(
+    "ADMIN_USER_ID configured: %s, value=[%s]",
+    bool(ADMIN_USER_ID),
+    ADMIN_USER_ID,
+)
+logging.info(
+    "MANAGER_CHAT_ID configured: %s, value=[%s]",
+    bool(MANAGER_CHAT_ID),
+    MANAGER_CHAT_ID,
+)
 
 MANUAL_NEW_PRODUCTS_PATH = Path(
     os.getenv("MANUAL_NEW_PRODUCTS_PATH", "/data/manual_new_products.json")
@@ -2491,6 +2502,22 @@ async def admin_new_remove(callback: CallbackQuery):
         )
     else:
         await callback.answer("Не вдалося зберегти.", show_alert=True)
+
+
+@dp.message(Command("admin_debug"))
+async def admin_debug(message: Message):
+    current_id = str(message.from_user.id).strip()
+    configured_id = str(ADMIN_USER_ID).strip()
+
+    await message.answer(
+        "🔎 <b>Перевірка адміністратора</b>\n\n"
+        f"Telegram ID користувача: <code>{current_id}</code>\n"
+        f"ADMIN_USER_ID із Railway: <code>{configured_id or 'порожньо'}</code>\n"
+        f"Довжина Telegram ID: <b>{len(current_id)}</b>\n"
+        f"Довжина ADMIN_USER_ID: <b>{len(configured_id)}</b>\n"
+        f"Збіг: <b>{'так' if current_id == configured_id else 'ні'}</b>",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Command("admin"))
