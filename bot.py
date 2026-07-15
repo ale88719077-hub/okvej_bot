@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.1"
-BOT_BUILD = "2026-07-15-clean-admin-architecture-fixed"
+BOT_VERSION = "13.2"
+BOT_BUILD = "2026-07-15-product-badges-hits-new"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1191,11 +1191,29 @@ def product_text(product):
     )
     description = clean_product_description(description)
 
-    lines = [
+    badges = []
+    article_key = str(article).strip()
+
+    if article_key and article_key in section_articles("hits"):
+        badges.append("🔥 <b>ХІТ ПРОДАЖУ</b> 🔥")
+
+    if article_key and article_key in section_articles("new_products"):
+        badges.append("🆕 <b>НОВИНКА</b>")
+
+    if article_key and article_key in section_articles("recommended"):
+        badges.append("⭐ <b>РЕКОМЕНДОВАНО</b>")
+
+    lines = []
+
+    if badges:
+        lines.extend(badges)
+        lines.append("")
+
+    lines.extend([
         f"🍬 <b>{title}</b>",
         "",
         f"💰 Ціна: <b>{price:g} грн</b>",
-    ]
+    ])
 
     if weight:
         lines.append(f"⚖️ Фасування: <b>{weight}</b>")
@@ -1209,6 +1227,7 @@ def product_text(product):
         lines.extend(["", f"📝 {description[:700]}"])
 
     return "\n".join(lines)
+
 
 
 def product_keyboard(product, user_id=None):
