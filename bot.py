@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.5"
-BOT_BUILD = "2026-07-15-catalog-photo-grid"
+BOT_VERSION = "13.6"
+BOT_BUILD = "2026-07-15-compact-photo-grid"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -908,7 +908,7 @@ def catalog_grid_keyboard(products, category_id: str, page: int):
         badge = product_badge_prefix(product)
         rows.append([
             InlineKeyboardButton(
-                text=f"{badge}{offset}. {title[:31]} — {price:g} грн",
+                text=f"{badge} {offset}. {title[:28]} · {price:g} грн",
                 callback_data=f"catalog_product:{key}:{category_id}:{page}",
             )
         ])
@@ -939,16 +939,16 @@ def catalog_grid_keyboard(products, category_id: str, page: int):
 
 def catalog_grid_text(category_title: str, products, page: int):
     total = len(products)
-    page_count = max(1, (total + CATALOG_GRID_PAGE_SIZE - 1) // CATALOG_GRID_PAGE_SIZE)
+    page_count = max(
+        1,
+        (total + CATALOG_GRID_PAGE_SIZE - 1) // CATALOG_GRID_PAGE_SIZE,
+    )
     page = max(0, min(page, page_count - 1))
-    start = page * CATALOG_GRID_PAGE_SIZE + 1
-    end = min((page + 1) * CATALOG_GRID_PAGE_SIZE, total)
+
     return (
-        f"🍬 <b>{category_title}</b>\n\n"
-        f"✅ У наявності: <b>{total}</b>\n"
-        f"📄 Сторінка: <b>{page + 1} із {page_count}</b>\n"
-        f"Показано: <b>{start}–{end}</b>\n\n"
-        "Натисніть на товар нижче, щоб відкрити велике фото та опис."
+        f"🍬 <b>{category_title}</b> · "
+        f"<b>{total}</b> товарів · "
+        f"сторінка <b>{page + 1}/{page_count}</b>"
     )
 
 
@@ -984,8 +984,13 @@ async def send_catalog_grid(message, category_title: str, products, category_id:
             caption.append("🔥 <b>ХІТ ПРОДАЖУ</b>")
         if article and article in section_articles("new_products"):
             caption.append("🆕 <b>НОВИНКА</b>")
+        if article and article in section_articles("recommended"):
+            caption.append("⭐ <b>РЕКОМЕНДОВАНО</b>")
 
-        caption.append(f"{offset}. <b>{html.escape(title)}</b>\n💰 {price:g} грн")
+        caption.append(
+            f"<b>{offset}. {html.escape(title)}</b>\n"
+            f"💰 <b>{price:g} грн</b>"
+        )
         media.append(InputMediaPhoto(
             media=image_url,
             caption="\n".join(caption),
