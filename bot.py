@@ -18,15 +18,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto,
 )
 
 from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.3"
-BOT_BUILD = "2026-07-15-channel-post-badges"
+BOT_VERSION = "13.4"
+BOT_BUILD = "2026-07-15-catalog-photo-carousel"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -873,6 +873,100 @@ def find_category(products, key: str):
         if category_key(name) == key:
             return name, items
     return None, []
+
+
+def catalog_carousel_keyboard(product, category_id: str, index: int, total: int, user_id):
+    key = product_key(product)
+    product_cache[key] = product
+
+    rows = []
+
+    navigation = []
+    if index > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️ Попередній",
+                callback_data=f"catalog_slide:{category_id}:{index - 1}",
+            )
+        )
+
+    navigation.append(
+        InlineKeyboardButton(
+            text=f"{index + 1}/{total}",
+            callback_data="catalog_noop",
+        )
+    )
+
+    if index + 1 < total:
+        navigation.append(
+            InlineKeyboardButton(
+                text="Наступний ➡️",
+                callback_data=f"catalog_slide:{category_id}:{index + 1}",
+            )
+        )
+
+    rows.append(navigation)
+    rows.append([
+        InlineKeyboardButton(
+            text="🛒 Додати в кошик",
+            callback_data=f"add:{key}",
+        ),
+        InlineKeyboardButton(
+            text="❤️ В обране",
+            callback_data=f"favorite_add:{key}",
+        ),
+    ])
+
+    rows.extend(admin_section_buttons(product, user_id))
+
+    rows.append([
+        InlineKeyboardButton(
+            text="🌐 Відкрити на сайті",
+            url=product_link(product),
+        )
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text="⬅️ До категорій",
+            callback_data="catalog_categories",
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_catalog_slide(message, products, category_id: str, index: int, user_id):
+    total = len(products)
+    index = max(0, min(index, total - 1))
+    product = products[index]
+    image_url = get_image_url(product)
+    caption = product_text(product)
+
+    if image_url:
+        await message.answer_photo(
+            photo=image_url,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=catalog_carousel_keyboard(
+                product,
+                category_id,
+                index,
+                total,
+                user_id,
+            ),
+        )
+    else:
+        await message.answer(
+            caption,
+            parse_mode="HTML",
+            reply_markup=catalog_carousel_keyboard(
+                product,
+                category_id,
+                index,
+                total,
+                user_id,
+            ),
+        )
 
 
 def catalog_page_keyboard(products, category_id: str, page: int) -> InlineKeyboardMarkup:
@@ -1916,12 +2010,78 @@ async def catalog_category(callback: CallbackQuery):
         await callback.answer("Категорію не знайдено.", show_alert=True)
         return
 
-    await callback.message.edit_text(
-        catalog_page_text(title, category_products, 0),
-        parse_mode="HTML",
-        reply_markup=catalog_page_keyboard(category_products, category_id, 0),
+    await send_catalog_slide(
+        callback.message,
+        category_products,
+        category_id,
+        0,
+        callback.from_user.id,
     )
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("catalog_slide:"))
+async def catalog_slide(callback: CallbackQuery):
+    try:
+        _, category_id, index_text = callback.data.split(":", 2)
+        index = int(index_text)
+
+        products = await get_in_stock_products()
+        _, category_products = find_category(products, category_id)
+
+        if not category_products:
+            await callback.answer("Категорію не знайдено.", show_alert=True)
+            return
+
+        index = max(0, min(index, len(category_products) - 1))
+        product = category_products[index]
+        image_url = get_image_url(product)
+        keyboard = catalog_carousel_keyboard(
+            product,
+            category_id,
+            index,
+            len(category_products),
+            callback.from_user.id,
+        )
+
+        if image_url and callback.message.photo:
+            await callback.message.edit_media(
+                media=InputMediaPhoto(
+                    media=image_url,
+                    caption=product_text(product),
+                    parse_mode="HTML",
+                ),
+                reply_markup=keyboard,
+            )
+        elif image_url:
+            await callback.message.answer_photo(
+                photo=image_url,
+                caption=product_text(product),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        else:
+            await callback.message.answer(
+                product_text(product),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+
+        key = product_key(product)
+        recent = user_recent[callback.from_user.id]
+        if key in recent:
+            recent.remove(key)
+        recent.insert(0, key)
+        del recent[10:]
+
+        await callback.answer()
+
+    except Exception:
+        logging.exception("Catalog slide error")
+        await callback.answer(
+            "Не вдалося перегорнути товар.",
+            show_alert=True,
+        )
 
 
 @dp.callback_query(F.data.startswith("catalog_page:"))
