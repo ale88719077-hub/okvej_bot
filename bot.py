@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.4"
-BOT_BUILD = "2026-07-15-catalog-photo-carousel"
+BOT_VERSION = "13.5"
+BOT_BUILD = "2026-07-15-catalog-photo-grid"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -60,6 +60,7 @@ shop = HoroshopAPI(
 user_carts = defaultdict(dict)
 user_favorites = defaultdict(set)
 user_recent = defaultdict(list)
+user_catalog_album_messages = defaultdict(list)
 product_cache = {}
 catalog_products_cache = []
 catalog_cache_until = 0.0
@@ -875,98 +876,131 @@ def find_category(products, key: str):
     return None, []
 
 
-def catalog_carousel_keyboard(product, category_id: str, index: int, total: int, user_id):
-    key = product_key(product)
-    product_cache[key] = product
+
+CATALOG_GRID_PAGE_SIZE = 8
+
+
+def product_badge_prefix(product):
+    article = product_article(product)
+    labels = []
+    if article and article in section_articles("hits"):
+        labels.append("🔥")
+    if article and article in section_articles("new_products"):
+        labels.append("🆕")
+    if article and article in section_articles("recommended"):
+        labels.append("⭐")
+    return "".join(labels)
+
+
+def catalog_grid_keyboard(products, category_id: str, page: int):
+    total = len(products)
+    page_count = max(1, (total + CATALOG_GRID_PAGE_SIZE - 1) // CATALOG_GRID_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * CATALOG_GRID_PAGE_SIZE
+    page_items = products[start:start + CATALOG_GRID_PAGE_SIZE]
 
     rows = []
+    for offset, product in enumerate(page_items, start=1):
+        key = product_key(product)
+        product_cache[key] = product
+        title = clean_product_title(localize(product.get("title")))
+        price = price_number(product)
+        badge = product_badge_prefix(product)
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{badge}{offset}. {title[:31]} — {price:g} грн",
+                callback_data=f"catalog_product:{key}:{category_id}:{page}",
+            )
+        ])
 
     navigation = []
-    if index > 0:
-        navigation.append(
-            InlineKeyboardButton(
-                text="⬅️ Попередній",
-                callback_data=f"catalog_slide:{category_id}:{index - 1}",
-            )
-        )
-
-    navigation.append(
-        InlineKeyboardButton(
-            text=f"{index + 1}/{total}",
-            callback_data="catalog_noop",
-        )
-    )
-
-    if index + 1 < total:
-        navigation.append(
-            InlineKeyboardButton(
-                text="Наступний ➡️",
-                callback_data=f"catalog_slide:{category_id}:{index + 1}",
-            )
-        )
+    if page > 0:
+        navigation.append(InlineKeyboardButton(
+            text="⬅️ Попередня",
+            callback_data=f"catalog_grid_page:{category_id}:{page - 1}",
+        ))
+    navigation.append(InlineKeyboardButton(
+        text=f"Сторінка {page + 1}/{page_count}",
+        callback_data="catalog_noop",
+    ))
+    if page + 1 < page_count:
+        navigation.append(InlineKeyboardButton(
+            text="Наступна ➡️",
+            callback_data=f"catalog_grid_page:{category_id}:{page + 1}",
+        ))
 
     rows.append(navigation)
-    rows.append([
-        InlineKeyboardButton(
-            text="🛒 Додати в кошик",
-            callback_data=f"add:{key}",
-        ),
-        InlineKeyboardButton(
-            text="❤️ В обране",
-            callback_data=f"favorite_add:{key}",
-        ),
-    ])
-
-    rows.extend(admin_section_buttons(product, user_id))
-
-    rows.append([
-        InlineKeyboardButton(
-            text="🌐 Відкрити на сайті",
-            url=product_link(product),
-        )
-    ])
-    rows.append([
-        InlineKeyboardButton(
-            text="⬅️ До категорій",
-            callback_data="catalog_categories",
-        )
-    ])
-
+    rows.append([InlineKeyboardButton(
+        text="⬅️ До категорій",
+        callback_data="catalog_categories",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def send_catalog_slide(message, products, category_id: str, index: int, user_id):
+def catalog_grid_text(category_title: str, products, page: int):
     total = len(products)
-    index = max(0, min(index, total - 1))
-    product = products[index]
-    image_url = get_image_url(product)
-    caption = product_text(product)
+    page_count = max(1, (total + CATALOG_GRID_PAGE_SIZE - 1) // CATALOG_GRID_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * CATALOG_GRID_PAGE_SIZE + 1
+    end = min((page + 1) * CATALOG_GRID_PAGE_SIZE, total)
+    return (
+        f"🍬 <b>{category_title}</b>\n\n"
+        f"✅ У наявності: <b>{total}</b>\n"
+        f"📄 Сторінка: <b>{page + 1} із {page_count}</b>\n"
+        f"Показано: <b>{start}–{end}</b>\n\n"
+        "Натисніть на товар нижче, щоб відкрити велике фото та опис."
+    )
 
-    if image_url:
-        await message.answer_photo(
-            photo=image_url,
-            caption=caption,
+
+async def clear_catalog_album(chat_id: int, user_id: int):
+    for message_id in user_catalog_album_messages.pop(user_id, []):
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+
+
+async def send_catalog_grid(message, category_title: str, products, category_id: str, page: int, user_id: int):
+    total = len(products)
+    page_count = max(1, (total + CATALOG_GRID_PAGE_SIZE - 1) // CATALOG_GRID_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * CATALOG_GRID_PAGE_SIZE
+    page_items = products[start:start + CATALOG_GRID_PAGE_SIZE]
+
+    await clear_catalog_album(message.chat.id, user_id)
+    media = []
+
+    for offset, product in enumerate(page_items, start=1):
+        image_url = get_image_url(product)
+        if not image_url:
+            continue
+
+        title = clean_product_title(localize(product.get("title")))
+        price = price_number(product)
+        article = product_article(product)
+        caption = []
+
+        if article and article in section_articles("hits"):
+            caption.append("🔥 <b>ХІТ ПРОДАЖУ</b>")
+        if article and article in section_articles("new_products"):
+            caption.append("🆕 <b>НОВИНКА</b>")
+
+        caption.append(f"{offset}. <b>{html.escape(title)}</b>\n💰 {price:g} грн")
+        media.append(InputMediaPhoto(
+            media=image_url,
+            caption="\n".join(caption),
             parse_mode="HTML",
-            reply_markup=catalog_carousel_keyboard(
-                product,
-                category_id,
-                index,
-                total,
-                user_id,
-            ),
-        )
-    else:
-        await message.answer(
-            caption,
-            parse_mode="HTML",
-            reply_markup=catalog_carousel_keyboard(
-                product,
-                category_id,
-                index,
-                total,
-                user_id,
-            ),
-        )
+        ))
+
+    if media:
+        sent = await message.answer_media_group(media=media)
+        user_catalog_album_messages[user_id] = [item.message_id for item in sent]
+
+    await message.answer(
+        catalog_grid_text(category_title, products, page),
+        parse_mode="HTML",
+        reply_markup=catalog_grid_keyboard(products, category_id, page),
+    )
 
 
 def catalog_page_keyboard(products, category_id: str, page: int) -> InlineKeyboardMarkup:
@@ -2010,8 +2044,9 @@ async def catalog_category(callback: CallbackQuery):
         await callback.answer("Категорію не знайдено.", show_alert=True)
         return
 
-    await send_catalog_slide(
+    await send_catalog_grid(
         callback.message,
+        title,
         category_products,
         category_id,
         0,
@@ -2020,75 +2055,10 @@ async def catalog_category(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("catalog_slide:"))
-async def catalog_slide(callback: CallbackQuery):
-    try:
-        _, category_id, index_text = callback.data.split(":", 2)
-        index = int(index_text)
-
-        products = await get_in_stock_products()
-        _, category_products = find_category(products, category_id)
-
-        if not category_products:
-            await callback.answer("Категорію не знайдено.", show_alert=True)
-            return
-
-        index = max(0, min(index, len(category_products) - 1))
-        product = category_products[index]
-        image_url = get_image_url(product)
-        keyboard = catalog_carousel_keyboard(
-            product,
-            category_id,
-            index,
-            len(category_products),
-            callback.from_user.id,
-        )
-
-        if image_url and callback.message.photo:
-            await callback.message.edit_media(
-                media=InputMediaPhoto(
-                    media=image_url,
-                    caption=product_text(product),
-                    parse_mode="HTML",
-                ),
-                reply_markup=keyboard,
-            )
-        elif image_url:
-            await callback.message.answer_photo(
-                photo=image_url,
-                caption=product_text(product),
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-        else:
-            await callback.message.answer(
-                product_text(product),
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-
-        key = product_key(product)
-        recent = user_recent[callback.from_user.id]
-        if key in recent:
-            recent.remove(key)
-        recent.insert(0, key)
-        del recent[10:]
-
-        await callback.answer()
-
-    except Exception:
-        logging.exception("Catalog slide error")
-        await callback.answer(
-            "Не вдалося перегорнути товар.",
-            show_alert=True,
-        )
-
-
-@dp.callback_query(F.data.startswith("catalog_page:"))
-async def catalog_page(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("catalog_grid_page:"))
+async def catalog_grid_page(callback: CallbackQuery):
     try:
         _, category_id, page_text = callback.data.split(":", 2)
-        page = int(page_text)
         products = await get_in_stock_products()
         title, category_products = find_category(products, category_id)
 
@@ -2096,18 +2066,21 @@ async def catalog_page(callback: CallbackQuery):
             await callback.answer("Категорію не знайдено.", show_alert=True)
             return
 
-        await callback.message.edit_text(
-            catalog_page_text(title, category_products, page),
-            parse_mode="HTML",
-            reply_markup=catalog_page_keyboard(category_products, category_id, page),
+        await send_catalog_grid(
+            callback.message,
+            title,
+            category_products,
+            category_id,
+            int(page_text),
+            callback.from_user.id,
         )
         await callback.answer()
+
     except Exception:
-        logging.exception("Catalog page error")
-        await callback.answer(
-            "Не вдалося відкрити сторінку каталогу.",
-            show_alert=True,
-        )
+        logging.exception("Catalog grid page error")
+        await callback.answer("Не вдалося відкрити сторінку каталогу.", show_alert=True)
+
+
 
 
 @dp.callback_query(F.data == "catalog_noop")
@@ -2148,7 +2121,7 @@ async def catalog_product(callback: CallbackQuery):
             callback.from_user.id,
             InlineKeyboardButton(
                 text="⬅️ Назад до категорії",
-                callback_data=f"catalog_page:{category_id}:{page}",
+                callback_data=f"catalog_grid_page:{category_id}:{page}",
             ),
         )
 
