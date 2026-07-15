@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.2"
-BOT_BUILD = "2026-07-15-product-badges-hits-new"
+BOT_VERSION = "13.3"
+BOT_BUILD = "2026-07-15-channel-post-badges"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1678,12 +1678,25 @@ async def manual_post_publish(message: Message, state: FSMContext):
                 product = item
                 break
 
+        badges = []
+
         if product:
             title = localize(product.get("title"))
             price = price_number(product)
             image_url = get_image_url(product)
             final_link = product_link(product)
-            price_line = f"💰 Цена: <b>{price:g} грн</b>\n\n"
+            price_line = f"💰 Ціна: <b>{price:g} грн</b>\n\n"
+
+            article = product_article(product)
+
+            if article and article in section_articles("hits"):
+                badges.append("🔥 <b>ХІТ ПРОДАЖУ</b> 🔥")
+
+            if article and article in section_articles("new_products"):
+                badges.append("🆕 <b>НОВИНКА</b>")
+
+            if article and article in section_articles("recommended"):
+                badges.append("⭐ <b>РЕКОМЕНДОВАНО</b>")
         else:
             # Если API возвращает другую языковую ссылку или другой slug,
             # читаем данные непосредственно со страницы товара.
@@ -1698,20 +1711,25 @@ async def manual_post_publish(message: Message, state: FSMContext):
                     formatted_price = f"{float(raw_price):g}"
                 except ValueError:
                     formatted_price = raw_price
-                price_line = f"💰 Цена: <b>{formatted_price} грн</b>\n\n"
+                price_line = f"💰 Ціна: <b>{formatted_price} грн</b>\n\n"
             else:
-                price_line = "💰 Актуальная цена указана на сайте\n\n"
+                price_line = "💰 Актуальна ціна вказана на сайті\n\n"
+
+        badge_text = ""
+        if badges:
+            badge_text = "\n".join(badges) + "\n\n"
 
         post_text = (
+            f"{badge_text}"
             f"🍬 <b>{title}</b>\n\n"
             f"{price_line}"
-            f"🔗 Заказать:\n{final_link}"
+            f"🔗 Замовити:\n{final_link}"
         )
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(
-                    text="🛒 Купить",
+                    text="🛒 Купити",
                     url=final_link,
                 )],
                 [InlineKeyboardButton(
@@ -1719,7 +1737,7 @@ async def manual_post_publish(message: Message, state: FSMContext):
                     url=f"https://t.me/{MANAGER_USERNAME}",
                 )],
                 [InlineKeyboardButton(
-                    text="🤖 Открыть бота",
+                    text="🤖 Відкрити бота",
                     url=BOT_URL,
                 )],
             ]
