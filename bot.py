@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.6"
-BOT_BUILD = "2026-07-15-compact-photo-grid"
+BOT_VERSION = "13.7"
+BOT_BUILD = "2026-07-15-storefront-priority-cards"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -345,7 +345,7 @@ def card_keyboard(product, user_id, back_button=None):
 
     rows = [
         [InlineKeyboardButton(
-            text="🛒 Додати в кошик",
+            text="🛒 Купити зараз",
             callback_data=f"add:{key}",
         )],
         [InlineKeyboardButton(
@@ -796,11 +796,33 @@ def category_sort_key(name: str):
         return (1, name.lower())
 
 
+def product_storefront_sort_key(product):
+    article = product_article(product)
+    is_hit = article in section_articles("hits")
+    is_new = article in section_articles("new_products")
+    is_recommended = article in section_articles("recommended")
+    title = clean_product_title(localize(product.get("title"))).lower()
+
+    return (
+        0 if is_hit else 1,
+        0 if is_new else 1,
+        0 if is_recommended else 1,
+        title,
+    )
+
+
 def grouped_categories(products):
     groups = {}
+
     for product in products:
         name = category_name(product)
         groups.setdefault(name, []).append(product)
+
+    for name in groups:
+        groups[name] = sorted(
+            groups[name],
+            key=product_storefront_sort_key,
+        )
 
     return dict(
         sorted(
@@ -930,6 +952,19 @@ def catalog_grid_keyboard(products, category_id: str, page: int):
         ))
 
     rows.append(navigation)
+
+    hit_count = sum(
+        1 for product in products
+        if product_article(product) in section_articles("hits")
+    )
+    if hit_count:
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🔥 Показати тільки хіти ({hit_count})",
+                callback_data=f"catalog_hits:{category_id}:0",
+            )
+        ])
+
     rows.append([InlineKeyboardButton(
         text="⬅️ До категорій",
         callback_data="catalog_categories",
@@ -1314,26 +1349,25 @@ def product_weight(product):
 def product_text(product):
     title = clean_product_title(localize(product.get("title")))
     price = price_number(product)
-    article = product.get("article") or "—"
+    article = product_article(product)
     weight = product_weight(product)
 
     description = localize(
-        product.get("description")
-        or product.get("short_description")
+        product.get("short_description")
         or product.get("description_short")
+        or product.get("description")
     )
     description = clean_product_description(description)
 
     badges = []
-    article_key = str(article).strip()
 
-    if article_key and article_key in section_articles("hits"):
+    if article and article in section_articles("hits"):
         badges.append("🔥 <b>ХІТ ПРОДАЖУ</b> 🔥")
 
-    if article_key and article_key in section_articles("new_products"):
+    if article and article in section_articles("new_products"):
         badges.append("🆕 <b>НОВИНКА</b>")
 
-    if article_key and article_key in section_articles("recommended"):
+    if article and article in section_articles("recommended"):
         badges.append("⭐ <b>РЕКОМЕНДОВАНО</b>")
 
     lines = []
@@ -1343,24 +1377,23 @@ def product_text(product):
         lines.append("")
 
     lines.extend([
-        f"🍬 <b>{title}</b>",
+        f"🍬 <b>{html.escape(title)}</b>",
         "",
         f"💰 Ціна: <b>{price:g} грн</b>",
     ])
 
     if weight:
-        lines.append(f"⚖️ Фасування: <b>{weight}</b>")
+        lines.append(f"⚖️ Фасування: <b>{html.escape(weight)}</b>")
 
-    lines.extend([
-        f"🏷 Артикул: <code>{article}</code>",
-        "✅ В наявності",
-    ])
+    lines.append("✅ В наявності")
 
     if description:
-        lines.extend(["", f"📝 {description[:700]}"])
+        short_description = description[:320].rstrip()
+        if len(description) > 320:
+            short_description += "…"
+        lines.extend(["", f"📝 {html.escape(short_description)}"])
 
     return "\n".join(lines)
-
 
 
 def product_keyboard(product, user_id=None):
@@ -2086,6 +2119,37 @@ async def catalog_grid_page(callback: CallbackQuery):
         await callback.answer("Не вдалося відкрити сторінку каталогу.", show_alert=True)
 
 
+
+
+@dp.callback_query(F.data.startswith("catalog_hits:"))
+async def catalog_hits(callback: CallbackQuery):
+    try:
+        _, category_id, page_text = callback.data.split(":", 2)
+        products = await get_in_stock_products()
+        title, category_products = find_category(products, category_id)
+
+        hit_products = [
+            product for product in category_products
+            if product_article(product) in section_articles("hits")
+        ]
+
+        if not hit_products:
+            await callback.answer("У цій категорії поки немає хітів.", show_alert=True)
+            return
+
+        await send_catalog_grid(
+            callback.message,
+            f"🔥 Хіти · {title}",
+            hit_products,
+            category_id,
+            int(page_text),
+            callback.from_user.id,
+        )
+        await callback.answer()
+
+    except Exception:
+        logging.exception("Catalog hits error")
+        await callback.answer("Не вдалося відкрити хіти.", show_alert=True)
 
 
 @dp.callback_query(F.data == "catalog_noop")
