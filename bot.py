@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "12.1"
-BOT_BUILD = "2026-07-15-admin-id-diagnostic"
+BOT_VERSION = "13.1"
+BOT_BUILD = "2026-07-15-clean-admin-architecture-fixed"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,25 +39,14 @@ CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@okvej")
 BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
-ADMIN_USER_ID = (os.getenv("ADMIN_USER_ID") or MANAGER_CHAT_ID or "").strip()
+ADMIN_USER_ID = (os.getenv("ADMIN_USER_ID") or "").strip()
 
-logging.info(
-    "ADMIN_USER_ID configured: %s, value=[%s]",
-    bool(ADMIN_USER_ID),
-    ADMIN_USER_ID,
+ADMIN_DATA_PATH = Path(
+    os.getenv("ADMIN_DATA_PATH", "/data/admin_data.json")
 )
-logging.info(
-    "MANAGER_CHAT_ID configured: %s, value=[%s]",
-    bool(MANAGER_CHAT_ID),
-    MANAGER_CHAT_ID,
-)
+if not ADMIN_DATA_PATH.parent.exists():
+    ADMIN_DATA_PATH = Path("admin_data.json")
 
-MANUAL_NEW_PRODUCTS_PATH = Path(
-    os.getenv("MANUAL_NEW_PRODUCTS_PATH", "/data/manual_new_products.json")
-)
-if not MANUAL_NEW_PRODUCTS_PATH.parent.exists():
-    MANUAL_NEW_PRODUCTS_PATH = Path("manual_new_products.json")
-logging.info("MANAGER_CHAT_ID configured: %s", bool(MANAGER_CHAT_ID))
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -104,20 +93,21 @@ main_menu = ReplyKeyboardMarkup(
         ],
         [
             KeyboardButton(text="🆕 Новинки"),
+            KeyboardButton(text="🔥 Хіти"),
+        ],
+        [
             KeyboardButton(text="❤️ Обране"),
-        ],
-        [
             KeyboardButton(text="🕒 Переглянуті"),
+        ],
+        [
             KeyboardButton(text="🛒 Кошик"),
-        ],
-        [
             KeyboardButton(text="🚚 Доставка й оплата"),
-            KeyboardButton(text="💬 Менеджер"),
         ],
         [
+            KeyboardButton(text="💬 Менеджер"),
             KeyboardButton(text="🌐 Сайт"),
-            KeyboardButton(text="📢 Канал OKVEJ"),
         ],
+        [KeyboardButton(text="📢 Канал OKVEJ")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -144,68 +134,134 @@ def product_key(product):
 
 
 def is_admin(user_id):
-    return bool(ADMIN_USER_ID) and str(user_id) == str(ADMIN_USER_ID)
+    return bool(ADMIN_USER_ID) and str(user_id).strip() == ADMIN_USER_ID
 
 
-def load_manual_new_articles():
+def default_admin_data():
+    return {
+        "new_products": [],
+        "hits": [],
+        "recommended": [],
+    }
+
+
+def load_admin_data():
+    data = default_admin_data()
+
     try:
-        if MANUAL_NEW_PRODUCTS_PATH.exists():
-            data = json.loads(
-                MANUAL_NEW_PRODUCTS_PATH.read_text(encoding="utf-8")
+        if ADMIN_DATA_PATH.exists():
+            saved = json.loads(
+                ADMIN_DATA_PATH.read_text(encoding="utf-8")
             )
-            return {
-                str(article).strip()
-                for article in data
-                if str(article).strip()
-            }
+            if isinstance(saved, dict):
+                for section in data:
+                    values = saved.get(section, [])
+                    if isinstance(values, list):
+                        data[section] = [
+                            str(value).strip()
+                            for value in values
+                            if str(value).strip()
+                        ]
     except Exception:
-        logging.exception("Failed to load manual new products")
-    return set()
+        logging.exception("Failed to load admin_data.json")
+
+    return data
 
 
-def save_manual_new_articles(articles):
+def save_admin_data():
     try:
-        MANUAL_NEW_PRODUCTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MANUAL_NEW_PRODUCTS_PATH.write_text(
-            json.dumps(
-                sorted(articles),
-                ensure_ascii=False,
-                indent=2,
-            ),
+        ADMIN_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ADMIN_DATA_PATH.write_text(
+            json.dumps(admin_data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         return True
     except Exception:
-        logging.exception("Failed to save manual new products")
+        logging.exception("Failed to save admin_data.json")
         return False
 
 
-manual_new_articles = load_manual_new_articles()
+admin_data = load_admin_data()
 
 
 def product_article(product):
     return str(product.get("article") or "").strip()
 
 
-def admin_new_button(product, user_id):
-    if not is_admin(user_id):
-        return None
+def section_articles(section):
+    return set(admin_data.get(section, []))
 
+
+def product_in_section(product, section):
+    article = product_article(product)
+    return bool(article) and article in section_articles(section)
+
+
+def set_product_section(product, section, enabled):
     article = product_article(product)
     if not article:
-        return None
+        return False
+
+    values = section_articles(section)
+    if enabled:
+        values.add(article)
+    else:
+        values.discard(article)
+
+    admin_data[section] = sorted(values)
+    return save_admin_data()
+
+
+def products_from_section(products, section):
+    by_article = {
+        product_article(product): product
+        for product in products
+        if product_article(product)
+    }
+
+    return [
+        by_article[article]
+        for article in admin_data.get(section, [])
+        if article in by_article and is_in_stock(by_article[article])
+    ]
+
+
+def admin_section_buttons(product, user_id):
+    if not is_admin(user_id):
+        return []
 
     key = product_key(product)
-    if article in manual_new_articles:
-        return InlineKeyboardButton(
-            text="❌ Прибрати з новинок",
-            callback_data=f"admin_new_remove:{key}",
-        )
+    rows = []
 
-    return InlineKeyboardButton(
-        text="🆕 Додати в новинки",
-        callback_data=f"admin_new_add:{key}",
-    )
+    rows.append([
+        InlineKeyboardButton(
+            text=(
+                "❌ Прибрати з новинок"
+                if product_in_section(product, "new_products")
+                else "🆕 Додати в новинки"
+            ),
+            callback_data=(
+                f"admin_section:new_products:"
+                f"{'remove' if product_in_section(product, 'new_products') else 'add'}:{key}"
+            ),
+        )
+    ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text=(
+                "❌ Прибрати з хітів"
+                if product_in_section(product, "hits")
+                else "🔥 Додати в хіти"
+            ),
+            callback_data=(
+                f"admin_section:hits:"
+                f"{'remove' if product_in_section(product, 'hits') else 'add'}:{key}"
+            ),
+        )
+    ])
+
+    return rows
 
 
 
@@ -219,41 +275,32 @@ def price_number(product):
         return 0.0
 
 
-MANUAL_NEW_PAGE_SIZE = 8
+ADMIN_SECTION_PAGE_SIZE = 8
 
 
-def manual_new_products(products):
-    by_article = {
-        product_article(product): product
-        for product in products
-        if product_article(product)
-    }
-    return [
-        by_article[article]
-        for article in manual_new_articles
-        if article in by_article and is_in_stock(by_article[article])
-    ]
-
-
-def manual_new_keyboard(products, page=0):
+def admin_section_keyboard(products, section, page=0):
     page_count = max(
         1,
-        (len(products) + MANUAL_NEW_PAGE_SIZE - 1) // MANUAL_NEW_PAGE_SIZE,
+        (len(products) + ADMIN_SECTION_PAGE_SIZE - 1)
+        // ADMIN_SECTION_PAGE_SIZE,
     )
     page = max(0, min(page, page_count - 1))
-    start = page * MANUAL_NEW_PAGE_SIZE
-    page_items = products[start:start + MANUAL_NEW_PAGE_SIZE]
+    start = page * ADMIN_SECTION_PAGE_SIZE
+    page_items = products[start:start + ADMIN_SECTION_PAGE_SIZE]
 
     rows = []
+    icon = "🆕" if section == "new_products" else "🔥"
+
     for product in page_items:
         key = product_key(product)
         product_cache[key] = product
         title = clean_product_title(localize(product.get("title")))
         price = price_number(product)
+
         rows.append([
             InlineKeyboardButton(
-                text=f"🆕 {title[:36]} — {price:g} грн",
-                callback_data=f"manual_new_product:{key}:{page}",
+                text=f"{icon} {title[:36]} — {price:g} грн",
+                callback_data=f"admin_product:{section}:{key}:{page}",
             )
         ])
 
@@ -262,20 +309,22 @@ def manual_new_keyboard(products, page=0):
         navigation.append(
             InlineKeyboardButton(
                 text="⬅️ Попередня",
-                callback_data=f"manual_new_page:{page - 1}",
+                callback_data=f"admin_section_page:{section}:{page - 1}",
             )
         )
+
     navigation.append(
         InlineKeyboardButton(
             text=f"Сторінка {page + 1}/{page_count}",
             callback_data="catalog_noop",
         )
     )
+
     if page + 1 < page_count:
         navigation.append(
             InlineKeyboardButton(
                 text="Наступна ➡️",
-                callback_data=f"manual_new_page:{page + 1}",
+                callback_data=f"admin_section_page:{section}:{page + 1}",
             )
         )
 
@@ -292,6 +341,7 @@ def manual_new_keyboard(products, page=0):
 def card_keyboard(product, user_id, back_button=None):
     key = product_key(product)
     product_cache[key] = product
+
     rows = [
         [InlineKeyboardButton(
             text="🛒 Додати в кошик",
@@ -303,9 +353,7 @@ def card_keyboard(product, user_id, back_button=None):
         )],
     ]
 
-    admin_button = admin_new_button(product, user_id)
-    if admin_button:
-        rows.append([admin_button])
+    rows.extend(admin_section_buttons(product, user_id))
 
     rows.extend([
         [InlineKeyboardButton(
@@ -322,6 +370,7 @@ def card_keyboard(product, user_id, back_button=None):
         rows.append([back_button])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def normalize_stock(value):
@@ -623,6 +672,8 @@ FIRST_WORD_CATEGORY_RULES = {
     "печиво": "Печиво",
     "печенье": "Печиво",
     "карамель": "Карамель",
+    "ірис": "Карамель",
+    "ирис": "Карамель",
     "зефір": "Зефір та мармелад",
     "зефир": "Зефір та мармелад",
     "мармелад": "Зефір та мармелад",
@@ -646,8 +697,7 @@ FIRST_WORD_CATEGORY_RULES = {
     "кекс": "Кекси та випічка",
     "кекси": "Кекси та випічка",
     "торт": "Кекси та випічка",
-    "ирис": "Карамель",
-    "ірис": "Карамель",
+    "рулет": "Кекси та випічка",
     "набір": "Подарункові набори",
     "набор": "Подарункові набори",
     "подарунковий": "Подарункові набори",
@@ -658,12 +708,12 @@ FIRST_WORD_CATEGORY_RULES = {
 def category_from_title(product):
     title = clean_product_title(localize(product.get("title")))
     normalized = normalize_title_for_category(title).strip()
-
     if not normalized:
         return None
 
-    first_word = normalized.split()[0].strip(" \"\'«»()[]{}.,:;_-")
+    first_word = normalized.split()[0].strip(" \"'«»()[]{}.,:;_-")
     return FIRST_WORD_CATEGORY_RULES.get(first_word)
+
 
 
 def category_from_link(product):
@@ -692,7 +742,6 @@ def category_from_link(product):
 
 
 def category_name(product):
-    # Главный принцип: категория определяется по первому слову названия.
     title_category = category_from_title(product)
     if title_category:
         return title_category
@@ -709,11 +758,12 @@ def category_name(product):
 
     if isinstance(category, dict):
         for key in ("title", "name", "value"):
-            title = localize(category.get(key)).strip()
-            if title:
-                return title
+            value = localize(category.get(key)).strip()
+            if value:
+                return value
 
     return category_from_link(product) or "Інші товари"
+
 
 
 def category_key(name: str) -> str:
@@ -1694,8 +1744,8 @@ async def version_handler(message: Message):
         "🤖 <b>OKVEJ Bot</b>\n\n"
         f"Версія: <b>{BOT_VERSION}</b>\n"
         f"Збірка: <b>{BOT_BUILD}</b>\n\n"
-        "Каталог працює через Horoshop API, показує лише товари "
-        "зі статусом «В наявності» та розподіляє товари за категоріями.",
+        "Каталог працює через Horoshop API та показує "
+        "лише товари зі статусом «В наявності».",
         parse_mode="HTML",
     )
 
@@ -2375,42 +2425,51 @@ async def recent_product(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.message(F.text == "🆕 Новинки")
-async def manual_new_products_menu(message: Message):
+async def show_manual_section(message: Message, section: str):
     products = await get_in_stock_products()
-    items = manual_new_products(products)
+    items = products_from_section(products, section)
+    title = "🆕 Новинки OKVEJ" if section == "new_products" else "🔥 Хіти OKVEJ"
 
     if not items:
         await message.answer(
-            "🆕 <b>Новинки поки не вибрані</b>\n\n"
-            "Адміністратор може додати товар у новинки "
-            "кнопкою під карткою товару.",
+            f"<b>{title}</b>\n\nТовари поки не вибрані.",
             parse_mode="HTML",
         )
         return
 
     await message.answer(
-        "🆕 <b>Новинки OKVEJ</b>\n\n"
+        f"<b>{title}</b>\n\n"
         f"Вибрано товарів: <b>{len(items)}</b>",
         parse_mode="HTML",
-        reply_markup=manual_new_keyboard(items, 0),
+        reply_markup=admin_section_keyboard(items, section, 0),
     )
 
 
-@dp.callback_query(F.data.startswith("manual_new_page:"))
-async def manual_new_page(callback: CallbackQuery):
-    page = int(callback.data.split(":", 1)[1])
+@dp.message(F.text == "🆕 Новинки")
+async def new_products_menu(message: Message):
+    await show_manual_section(message, "new_products")
+
+
+@dp.message(F.text == "🔥 Хіти")
+async def hits_menu(message: Message):
+    await show_manual_section(message, "hits")
+
+
+@dp.callback_query(F.data.startswith("admin_section_page:"))
+async def admin_section_page(callback: CallbackQuery):
+    _, section, page_text = callback.data.split(":", 2)
     products = await get_in_stock_products()
-    items = manual_new_products(products)
+    items = products_from_section(products, section)
+
     await callback.message.edit_reply_markup(
-        reply_markup=manual_new_keyboard(items, page),
+        reply_markup=admin_section_keyboard(items, section, int(page_text)),
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("manual_new_product:"))
-async def manual_new_product_card(callback: CallbackQuery):
-    _, key, page_text = callback.data.split(":", 2)
+@dp.callback_query(F.data.startswith("admin_product:"))
+async def admin_product_card(callback: CallbackQuery):
+    _, section, key, page_text = callback.data.split(":", 3)
     product = product_cache.get(key)
 
     if not product:
@@ -2424,16 +2483,17 @@ async def manual_new_product_card(callback: CallbackQuery):
         await callback.answer("Товар не знайдено.", show_alert=True)
         return
 
-    image_url = get_image_url(product)
+    back_title = "новинок" if section == "new_products" else "хітів"
     keyboard = card_keyboard(
         product,
         callback.from_user.id,
         InlineKeyboardButton(
-            text="⬅️ До новинок",
-            callback_data=f"manual_new_page:{page_text}",
+            text=f"⬅️ До {back_title}",
+            callback_data=f"admin_section_page:{section}:{page_text}",
         ),
     )
 
+    image_url = get_image_url(product)
     if image_url:
         await callback.message.answer_photo(
             photo=image_url,
@@ -2447,16 +2507,21 @@ async def manual_new_product_card(callback: CallbackQuery):
             parse_mode="HTML",
             reply_markup=keyboard,
         )
+
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("admin_new_add:"))
-async def admin_new_add(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("admin_section:"))
+async def admin_section_toggle(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Немає доступу.", show_alert=True)
         return
 
-    key = callback.data.split(":", 1)[1]
+    _, section, action, key = callback.data.split(":", 3)
+    if section not in {"new_products", "hits", "recommended"}:
+        await callback.answer("Невідомий розділ.", show_alert=True)
+        return
+
     product = product_cache.get(key)
     if not product:
         products = await get_in_stock_products()
@@ -2469,65 +2534,38 @@ async def admin_new_add(callback: CallbackQuery):
         await callback.answer("Товар не знайдено.", show_alert=True)
         return
 
-    article = product_article(product)
-    manual_new_articles.add(article)
-
-    if save_manual_new_articles(manual_new_articles):
-        await callback.answer("Додано в новинки 🆕", show_alert=True)
-        await callback.message.edit_reply_markup(
-            reply_markup=card_keyboard(product, callback.from_user.id)
-        )
-    else:
+    enabled = action == "add"
+    if not set_product_section(product, section, enabled):
         await callback.answer("Не вдалося зберегти.", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("admin_new_remove:"))
-async def admin_new_remove(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Немає доступу.", show_alert=True)
         return
 
-    key = callback.data.split(":", 1)[1]
-    product = product_cache.get(key)
-    if not product:
-        await callback.answer("Товар не знайдено.", show_alert=True)
-        return
+    names = {
+        "new_products": "новинки",
+        "hits": "хіти",
+        "recommended": "рекомендовані",
+    }
+    await callback.answer(
+        f"Товар {'додано в' if enabled else 'прибрано з'} {names[section]}.",
+        show_alert=True,
+    )
 
-    manual_new_articles.discard(product_article(product))
-
-    if save_manual_new_articles(manual_new_articles):
-        await callback.answer("Прибрано з новинок.", show_alert=True)
-        await callback.message.edit_reply_markup(
-            reply_markup=card_keyboard(product, callback.from_user.id)
-        )
-    else:
-        await callback.answer("Не вдалося зберегти.", show_alert=True)
-
-
-@dp.message(Command("admin_debug"))
-async def admin_debug(message: Message):
-    current_id = str(message.from_user.id).strip()
-    configured_id = str(ADMIN_USER_ID).strip()
-
-    await message.answer(
-        "🔎 <b>Перевірка адміністратора</b>\n\n"
-        f"Telegram ID користувача: <code>{current_id}</code>\n"
-        f"ADMIN_USER_ID із Railway: <code>{configured_id or 'порожньо'}</code>\n"
-        f"Довжина Telegram ID: <b>{len(current_id)}</b>\n"
-        f"Довжина ADMIN_USER_ID: <b>{len(configured_id)}</b>\n"
-        f"Збіг: <b>{'так' if current_id == configured_id else 'ні'}</b>",
-        parse_mode="HTML",
+    await callback.message.edit_reply_markup(
+        reply_markup=card_keyboard(product, callback.from_user.id),
     )
 
 
 @dp.message(Command("admin"))
 async def admin_status(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас немає доступу до адмін-панелі.")
+        return
+
     await message.answer(
         "⚙️ <b>Адмін-панель OKVEJ</b>\n\n"
-        f"Ваш Telegram ID: <code>{message.from_user.id}</code>\n"
-        f"Доступ адміністратора: <b>{'так' if is_admin(message.from_user.id) else 'ні'}</b>\n"
-        f"Новинок вибрано: <b>{len(manual_new_articles)}</b>\n\n"
-        "Щоб додати товар у новинки, відкрийте його картку.",
+        f"Новинок: <b>{len(admin_data['new_products'])}</b>\n"
+        f"Хітів: <b>{len(admin_data['hits'])}</b>\n"
+        f"Рекомендованих: <b>{len(admin_data['recommended'])}</b>\n\n"
+        "Відкрийте картку товару, щоб додати або прибрати його.",
         parse_mode="HTML",
     )
 
@@ -2556,7 +2594,7 @@ async def channel(message: Message):
 
 
 async def main():
-    logging.info("Starting OKVEJ bot")
+    logging.info("Starting OKVEJ bot v%s (%s)", BOT_VERSION, BOT_BUILD)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
