@@ -8,6 +8,7 @@ import hashlib
 import html
 from collections import defaultdict
 from pathlib import Path
+from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse, unquote
 
 import aiohttp
@@ -18,15 +19,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto,
 )
 
 from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "15.0.1"
-BOT_BUILD = "2026-07-16-openai-sales-assistant"
+BOT_VERSION = "13.9"
+BOT_BUILD = "2026-07-16-built-in-analytics"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -40,15 +41,18 @@ BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
 ADMIN_USER_ID = (os.getenv("ADMIN_USER_ID") or "").strip()
-OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
-OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-5.6-luna").strip()
-OPENAI_API_URL = "https://api.openai.com/v1/responses"
 
 ADMIN_DATA_PATH = Path(
     os.getenv("ADMIN_DATA_PATH", "/data/admin_data.json")
 )
 if not ADMIN_DATA_PATH.parent.exists():
     ADMIN_DATA_PATH = Path("admin_data.json")
+
+ANALYTICS_DATA_PATH = Path(
+    os.getenv("ANALYTICS_DATA_PATH", "/data/analytics_data.json")
+)
+if not ANALYTICS_DATA_PATH.parent.exists():
+    ANALYTICS_DATA_PATH = Path("analytics_data.json")
 
 
 bot = Bot(token=TOKEN)
@@ -74,10 +78,6 @@ CATALOG_CACHE_SECONDS = 600
 
 class SearchState(StatesGroup):
     waiting_query = State()
-
-
-class AIState(StatesGroup):
-    chatting = State()
 
 
 class PostState(StatesGroup):
@@ -112,14 +112,10 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🚚 Доставка й оплата"),
         ],
         [
-            KeyboardButton(text="🤖 AI Помічник"),
             KeyboardButton(text="💬 Менеджер"),
-        ],
-        [
             KeyboardButton(text="🌐 Сайт"),
-            KeyboardButton(text="📢 Канал OKVEJ"),
         ],
-        [KeyboardButton(text="❌ Сховати меню")],
+        [KeyboardButton(text="📢 Канал OKVEJ")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -194,6 +190,81 @@ def save_admin_data():
 
 
 admin_data = load_admin_data()
+
+def default_analytics_data():
+    return {"started_at": datetime.now(timezone.utc).isoformat(), "users": [], "events": {}, "products": {}, "searches": {}, "daily": {}}
+
+def load_analytics_data():
+    data = default_analytics_data()
+    try:
+        if ANALYTICS_DATA_PATH.exists():
+            saved = json.loads(ANALYTICS_DATA_PATH.read_text(encoding="utf-8"))
+            if isinstance(saved, dict): data.update(saved)
+    except Exception:
+        logging.exception("Failed to load analytics_data.json")
+    for key, default in (("users", []), ("events", {}), ("products", {}), ("searches", {}), ("daily", {})):
+        if not isinstance(data.get(key), type(default)): data[key] = default
+    return data
+
+def save_analytics_data():
+    try:
+        ANALYTICS_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ANALYTICS_DATA_PATH.write_text(json.dumps(analytics_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        logging.exception("Failed to save analytics_data.json")
+        return False
+
+analytics_data = load_analytics_data()
+
+def analytics_today_key():
+    return datetime.now(timezone.utc).date().isoformat()
+
+def track_event(event_name, user_id=None, product=None, query=None):
+    try:
+        if user_id is not None:
+            uid=str(user_id)
+            if uid not in analytics_data["users"]: analytics_data["users"].append(uid)
+        analytics_data["events"][event_name]=int(analytics_data["events"].get(event_name,0))+1
+        day=analytics_today_key(); daily=analytics_data["daily"].setdefault(day,{"users":[],"events":{},"products":{},"searches":{}})
+        if user_id is not None:
+            uid=str(user_id)
+            if uid not in daily["users"]: daily["users"].append(uid)
+        daily["events"][event_name]=int(daily["events"].get(event_name,0))+1
+        if product:
+            article=product_article(product) or product_key(product); title=clean_product_title(localize(product.get("title")))
+            rec=analytics_data["products"].setdefault(article,{"title":title,"views":0,"cart_adds":0,"favorites":0}); rec["title"]=title
+            drec=daily["products"].setdefault(article,{"title":title,"views":0,"cart_adds":0,"favorites":0}); drec["title"]=title
+            metric={"product_view":"views","cart_add":"cart_adds","favorite_add":"favorites"}.get(event_name)
+            if metric:
+                rec[metric]=int(rec.get(metric,0))+1; drec[metric]=int(drec.get(metric,0))+1
+        if query:
+            q=str(query).strip().lower()
+            if q:
+                analytics_data["searches"][q]=int(analytics_data["searches"].get(q,0))+1
+                daily["searches"][q]=int(daily["searches"].get(q,0))+1
+        save_analytics_data()
+    except Exception:
+        logging.exception("Analytics tracking error")
+
+def top_items(mapping, metric=None, limit=5):
+    items=[]
+    for key,value in mapping.items():
+        if isinstance(value,dict): score=int(value.get(metric or "views",0)); label=value.get("title") or key
+        else: score=int(value); label=key
+        items.append((label,score))
+    return sorted(items,key=lambda x:(-x[1],str(x[0]).lower()))[:limit]
+
+def analytics_report(data,title):
+    e=data.get("events",{}); users=data.get("users",[]); products=data.get("products",{}); searches=data.get("searches",{})
+    lines=[f"📊 <b>{title}</b>","",f"👥 Користувачів: <b>{len(users)}</b>",f"▶️ Запусків: <b>{e.get('start',0)}</b>",f"🍬 Відкриттів каталогу: <b>{e.get('catalog_open',0)}</b>",f"🔍 Пошуків: <b>{e.get('search',0)}</b>",f"👆 Переглядів товарів: <b>{e.get('product_view',0)}</b>",f"🛒 Додавань у кошик: <b>{e.get('cart_add',0)}</b>",f"❤️ Додавань в обране: <b>{e.get('favorite_add',0)}</b>",f"✅ Початих оформлень: <b>{e.get('checkout_start',0)}</b>",f"📢 Публікацій у канал: <b>{e.get('channel_post',0)}</b>"]
+    tp=top_items(products,"views",5)
+    if tp:
+        lines += ["","🔥 <b>Топ товарів:</b>"]+[f"{i}. {html.escape(str(label)[:70])} — {score}" for i,(label,score) in enumerate(tp,1)]
+    ts=top_items(searches,limit=5)
+    if ts:
+        lines += ["","🔎 <b>Топ пошуку:</b>"]+[f"{i}. {html.escape(str(label)[:50])} — {score}" for i,(label,score) in enumerate(ts,1)]
+    return "\n".join(lines)
 
 
 def product_article(product):
@@ -902,101 +973,7 @@ def categories_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-
-def manufacturer_name(product):
-    """Повертає виробника з Horoshop API або визначає його з назви товару."""
-    candidates = [
-        product.get("brand"),
-        product.get("manufacturer"),
-        product.get("producer"),
-        product.get("vendor"),
-        product.get("brand_name"),
-        product.get("manufacturer_name"),
-    ]
-
-    for value in candidates:
-        if isinstance(value, dict):
-            for key in ("title", "name", "value", "ua", "uk", "ru"):
-                text = localize(value.get(key)).strip()
-                if text:
-                    return text
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    text = localize(item.get("title") or item.get("name") or item.get("value")).strip()
-                else:
-                    text = str(item or "").strip()
-                if text:
-                    return text
-        else:
-            text = str(value or "").strip()
-            if text:
-                return text
-
-    title = clean_product_title(localize(product.get("title")))
-    known = (
-        "Roshen", "Millennium", "AVK", "АВК", "Konti", "Конті",
-        "Lubimov", "Любимов", "Rosso", "Demi", "DEMI", "ADC Sweets",
-        "Prestige", "Tayas", "Elvan", "Ulker", "Ülker", "Eti",
-        "Kinder", "Ferrero", "Nestle", "Nestlé", "Mars", "Snickers",
-        "Twix", "Bounty", "Mentos", "Haribo", "Bebeto", "Bonart",
-    )
-    lower = title.lower()
-    for brand in known:
-        if brand.lower() in lower:
-            return brand
-    return "Інші виробники"
-
-
-def manufacturer_key(name: str) -> str:
-    return "m" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:9]
-
-
-def grouped_manufacturers(products):
-    groups = {}
-    for product in products:
-        name = manufacturer_name(product)
-        groups.setdefault(name, []).append(product)
-    for name in groups:
-        groups[name] = sorted(groups[name], key=product_storefront_sort_key)
-    return dict(sorted(groups.items(), key=lambda item: (item[0] == "Інші виробники", item[0].lower())))
-
-
-MANUFACTURER_PAGE_SIZE = 12
-
-
-def manufacturers_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
-    groups = list(grouped_manufacturers(products).items())
-    total = len(groups)
-    page_count = max(1, (total + MANUFACTURER_PAGE_SIZE - 1) // MANUFACTURER_PAGE_SIZE)
-    page = max(0, min(page, page_count - 1))
-    start = page * MANUFACTURER_PAGE_SIZE
-    rows = []
-    for name, items in groups[start:start + MANUFACTURER_PAGE_SIZE]:
-        rows.append([InlineKeyboardButton(
-            text=f"🏭 {name[:35]} ({len(items)})",
-            callback_data=f"manufacturer:{manufacturer_key(name)}",
-        )])
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"manufacturers_page:{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"{page+1}/{page_count}", callback_data="catalog_noop"))
-    if page + 1 < page_count:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"manufacturers_page:{page+1}"))
-    rows.append(nav)
-    rows.append([InlineKeyboardButton(text="🍬 До категорій", callback_data="catalog_categories")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def find_manufacturer(products, key: str):
-    for name, items in grouped_manufacturers(products).items():
-        if manufacturer_key(name) == key:
-            return name, items
-    return None, []
-
 def find_category(products, key: str):
-    if key.startswith("m"):
-        return find_manufacturer(products, key)
     for name, items in grouped_categories(products).items():
         if category_key(name) == key:
             return name, items
@@ -1140,17 +1117,9 @@ async def send_catalog_grid(
         if article and article in section_articles("recommended"):
             caption.append("⭐ <b>РЕКОМЕНДОВАНО</b>")
 
-        brand = manufacturer_name(product)
-        if brand == "Інші виробники":
-            brand = ""
-
-        caption.append(f"🍬 <b>{html.escape(title)}</b>")
-        if brand:
-            caption.append(f"🏷️ {html.escape(brand)}")
         caption.extend([
-            "",
+            f"🍬 <b>{html.escape(title)}</b>",
             f"💰 <b>{price:g} грн</b>",
-            "✅ В наявності",
         ])
 
         keyboard = InlineKeyboardMarkup(
@@ -1158,11 +1127,7 @@ async def send_catalog_grid(
                 InlineKeyboardButton(
                     text="👆 Детальніше",
                     callback_data=f"catalog_product:{key}:{category_id}:{page}",
-                ),
-                InlineKeyboardButton(
-                    text="🛒 Купити",
-                    callback_data=f"add:{key}",
-                ),
+                )
             ]]
         )
 
@@ -1215,8 +1180,8 @@ async def send_catalog_grid(
             inline_keyboard=[
                 navigation,
                 [InlineKeyboardButton(
-                    text="⬅️ До виробників" if category_id.startswith("m") else "⬅️ До категорій",
-                    callback_data="catalog_manufacturers" if category_id.startswith("m") else "catalog_categories",
+                    text="⬅️ До категорій",
+                    callback_data="catalog_categories",
                 )],
             ]
         ),
@@ -1556,16 +1521,10 @@ def product_text(product):
         lines.extend(badges)
         lines.append("")
 
-    brand = manufacturer_name(product)
-    if brand == "Інші виробники":
-        brand = ""
-
-    lines.append(f"🍬 <b>{html.escape(title)}</b>")
-    if brand:
-        lines.append(f"🏷️ Бренд: <b>{html.escape(brand)}</b>")
     lines.extend([
+        f"🍬 <b>{html.escape(title)}</b>",
         "",
-        f"💰 <b>Ціна: {price:g} грн</b>",
+        f"💰 Ціна: <b>{price:g} грн</b>",
     ])
 
     if weight:
@@ -1676,6 +1635,7 @@ async def add_to_cart(callback: CallbackQuery):
         await callback.answer("Товару вже немає в наявності.", show_alert=True)
         return
     user_carts[callback.from_user.id][key] = user_carts[callback.from_user.id].get(key, 0) + 1
+    track_event("cart_add", callback.from_user.id, product=product)
 
     quick_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
@@ -1713,6 +1673,7 @@ async def favorite_add(callback: CallbackQuery):
         return
 
     user_favorites[callback.from_user.id].add(key)
+    track_event("favorite_add", callback.from_user.id, product=product)
     await callback.answer("Додано в обране ❤️", show_alert=True)
 
 
@@ -1869,6 +1830,7 @@ def build_order_text(user_id: int, data: dict) -> str:
 
 @dp.callback_query(F.data == "checkout_start")
 async def checkout_start(callback: CallbackQuery, state: FSMContext):
+    track_event("checkout_start", callback.from_user.id)
     if not user_carts[callback.from_user.id]:
         await callback.answer("Кошик порожній.", show_alert=True)
         return
@@ -2111,6 +2073,7 @@ async def manual_post_publish(message: Message, state: FSMContext):
                 reply_markup=keyboard,
             )
 
+        track_event("channel_post", message.from_user.id, product=product)
         await message.answer("✅ Товар опубликован в канале.")
         await state.clear()
 
@@ -2119,17 +2082,42 @@ async def manual_post_publish(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка публикации: {e}")
 
 
+@dp.message(Command("analytics"))
+async def analytics_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Немає доступу.")
+        return
+    await message.answer(analytics_report(analytics_data,"Аналітика OKVEJ · за весь час"),parse_mode="HTML")
+
+@dp.message(Command("analytics_today"))
+async def analytics_today_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Немає доступу.")
+        return
+    today=analytics_today_key(); daily=analytics_data.get("daily",{}).get(today,{"users":[],"events":{},"products":{},"searches":{}})
+    await message.answer(analytics_report(daily,f"Аналітика OKVEJ · сьогодні ({today})"),parse_mode="HTML")
+
+@dp.message(Command("analytics_reset"))
+async def analytics_reset_handler(message: Message):
+    global analytics_data
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Немає доступу.")
+        return
+    analytics_data=default_analytics_data(); save_analytics_data(); await message.answer("🧹 Аналітику очищено.")
+
 @dp.message(Command("commands"))
 async def commands_handler(message: Message):
     await message.answer(
         "⚡ <b>Швидкі команди OKVEJ</b>\n\n"
         "/start — відкрити головне меню\n"
         "/menu — оновити клавіатуру\n"
-        "/hide — сховати клавіатуру\n"
         "/version — перевірити версію бота\n"
         "/admin — відкрити адмін-панель\n"
         "/пост — опублікувати товар у каналі\n"
         "/myid — показати Telegram ID\n"
+        "/analytics — аналітика за весь час\n"
+        "/analytics_today — аналітика за сьогодні\n"
+        "/analytics_reset — очистити аналітику\n"
         "/commands — список швидких команд",
         parse_mode="HTML",
         reply_markup=main_menu,
@@ -2137,29 +2125,10 @@ async def commands_handler(message: Message):
 
 
 @dp.message(Command("menu"))
-async def menu_command(message: Message, state: FSMContext):
-    await state.clear()
+async def menu_command(message: Message):
     await message.answer(
         "✅ Головне меню оновлено.",
         reply_markup=main_menu,
-    )
-
-
-@dp.message(Command("hide"))
-async def hide_menu_command(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "✅ Меню приховано. Щоб повернути його, надішліть /menu.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
-
-@dp.message(F.text == "❌ Сховати меню")
-async def hide_menu_button(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "✅ Меню приховано. Щоб повернути його, надішліть /menu.",
-        reply_markup=ReplyKeyboardRemove(),
     )
 
 
@@ -2177,6 +2146,7 @@ async def version_handler(message: Message):
 
 @dp.message(CommandStart())
 async def start(message: Message):
+    track_event("start", message.from_user.id)
 
     await message.answer("🍬 <b>Вітаємо в OKVEJ!</b>", parse_mode="HTML", reply_markup=main_menu)
 
@@ -2202,9 +2172,9 @@ async def delivery(message: Message):
     )
 
 
-
 @dp.message(F.text == "🍬 Каталог")
 async def catalog(message: Message):
+    track_event("catalog_open", message.from_user.id)
     loading = await message.answer("⏳ Завантажую каталог...")
 
     try:
@@ -2400,6 +2370,8 @@ async def catalog_product(callback: CallbackQuery):
             )
             return
 
+        track_event("product_view", callback.from_user.id, product=product)
+
         page = int(page_text)
 
         recent = user_recent[callback.from_user.id]
@@ -2412,7 +2384,7 @@ async def catalog_product(callback: CallbackQuery):
             product,
             callback.from_user.id,
             InlineKeyboardButton(
-                text="⬅️ Назад до виробника" if category_id.startswith("m") else "⬅️ Назад до категорії",
+                text="⬅️ Назад до категорії",
                 callback_data=f"catalog_grid_page:{category_id}:{page}",
             ),
         )
@@ -2626,271 +2598,6 @@ def search_products_ranked(products, query):
     return [product for _, product in scored]
 
 
-
-AI_HELP_TEXT = (
-    "🤖 <b>AI-помічник OKVEJ</b>\n\n"
-    "Напишіть звичайними словами, що ви шукаєте. Наприклад:\n"
-    "• цукерки з арахісом до 300 грн\n"
-    "• подарунок дитині до 800 грн\n"
-    "• щось шоколадне до кави\n"
-    "• як оформити замовлення\n\n"
-    "Я підберу лише товари, які зараз є в наявності."
-)
-
-AI_EXIT_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-    text="❌ Завершити розмову з AI",
-    callback_data="ai_exit",
-)]])
-
-
-def ai_product_summary(product, index):
-    title = clean_product_title(localize(product.get("title")))
-    description = clean_product_description(
-        localize(product.get("short_description") or product.get("description") or "")
-    )[:180]
-    article = product_article(product)
-    price = price_number(product)
-    parts = [f"{index}. {title}", f"ціна {price:g} грн"]
-    if article:
-        parts.append(f"артикул {article}")
-    if description:
-        parts.append(description)
-    return " | ".join(parts)
-
-
-def ai_candidate_score(product, query):
-    normalized = normalize_search_text(query)
-    words = [w for w in normalized.split() if len(w) >= 3]
-    searchable = normalize_search_text(" ".join([
-        localize(product.get("title")),
-        localize(product.get("short_description")),
-        localize(product.get("description")),
-        str(product.get("article") or ""),
-    ]))
-    score = product_search_score(product, query)
-    for word in words:
-        if word in searchable:
-            score += 180
-    price_match = re.search(r"(?:до|менше|не дорожче|до бюджету)\s*(\d{2,5})", normalized)
-    if price_match:
-        limit = float(price_match.group(1))
-        price = price_number(product)
-        if price <= limit:
-            score += 350
-        else:
-            score -= min(900, int(price - limit) * 3)
-    article = product_article(product)
-    if article in section_articles("hits"):
-        score += 90
-    if article in section_articles("new_products"):
-        score += 60
-    if article in section_articles("recommended"):
-        score += 70
-    return score
-
-
-def ai_candidates(products, query, limit=24):
-    ranked = sorted(
-        products,
-        key=lambda product: (
-            -ai_candidate_score(product, query),
-            price_number(product),
-            clean_product_title(localize(product.get("title"))).lower(),
-        ),
-    )
-    return ranked[:limit]
-
-
-def extract_openai_text(data):
-    for item in data.get("output", []):
-        if item.get("type") != "message":
-            continue
-        for content in item.get("content", []):
-            if content.get("type") == "output_text" and content.get("text"):
-                return content["text"].strip()
-    return ""
-
-
-async def ask_openai_sales_assistant(query, candidates):
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set")
-
-    catalog = "\n".join(
-        ai_product_summary(product, index)
-        for index, product in enumerate(candidates, start=1)
-    )
-    instructions = (
-        "Ти — ввічливий продавець-консультант українського магазину солодощів OKVEJ. "
-        "Відповідай українською, коротко та практично. "
-        "Не вигадуй товари, ціни, наявність, умови доставки чи оплати. "
-        "Рекомендуй тільки товари з переданого списку. "
-        "Якщо покупець питає, як оформити замовлення, поясни: додати товар у кошик, "
-        "відкрити «🛒 Кошик», натиснути «Оформити замовлення» та заповнити дані. "
-        "Якщо даних недостатньо, постав одне уточнювальне питання. "
-        "Поверни СУВОРО JSON без markdown у форматі: "
-        '{"answer":"текст відповіді","selected_indices":[1,2,3]}. '
-        "selected_indices — максимум 5 номерів зі списку; для загального питання або оформлення може бути порожнім."
-    )
-    user_input = f"Запит покупця: {query}\n\nТовари в наявності:\n{catalog}"
-    payload = {
-        "model": OPENAI_MODEL,
-        "instructions": instructions,
-        "input": user_input,
-        "max_output_tokens": 700,
-        "store": False,
-    }
-    timeout = aiohttp.ClientTimeout(total=45)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(
-            OPENAI_API_URL,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-        ) as response:
-            data = await response.json(content_type=None)
-            if response.status >= 400:
-                message = data.get("error", {}).get("message") or str(data)
-                raise RuntimeError(f"OpenAI API error {response.status}: {message}")
-
-    raw = extract_openai_text(data)
-    if not raw:
-        raise RuntimeError("OpenAI returned empty response")
-    raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw[:3500], []
-    answer = str(parsed.get("answer") or "").strip()[:3500]
-    selected = []
-    for value in parsed.get("selected_indices", []):
-        try:
-            index = int(value)
-        except (TypeError, ValueError):
-            continue
-        if 1 <= index <= len(candidates) and index not in selected:
-            selected.append(index)
-        if len(selected) >= 5:
-            break
-    return answer, selected
-
-
-def ai_products_keyboard(products):
-    rows = []
-    for product in products:
-        key = product_key(product)
-        product_cache[key] = product
-        title = clean_product_title(localize(product.get("title")))
-        price = price_number(product)
-        rows.append([
-            InlineKeyboardButton(
-                text=f"🍬 {title[:28]} · {price:g} грн",
-                callback_data=f"ai_product:{key}",
-            ),
-            InlineKeyboardButton(
-                text="🛒",
-                callback_data=f"add:{key}",
-            ),
-        ])
-    rows.append([InlineKeyboardButton(text="❌ Завершити AI", callback_data="ai_exit")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-@dp.message(Command("ai"))
-@dp.message(F.text == "🤖 AI Помічник")
-async def ai_start(message: Message, state: FSMContext):
-    if not OPENAI_API_KEY:
-        await message.answer(
-            "⚠️ AI ще не підключено. Перевірте змінну OPENAI_API_KEY у Railway."
-        )
-        return
-    await state.set_state(AIState.chatting)
-    await message.answer(AI_HELP_TEXT, parse_mode="HTML", reply_markup=AI_EXIT_KEYBOARD)
-
-
-@dp.callback_query(F.data == "ai_exit")
-async def ai_exit(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.answer("✅ AI-помічник завершив розмову.", reply_markup=main_menu)
-    await callback.answer()
-
-
-@dp.message(Command("cancel"))
-async def cancel_dialog(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("✅ Поточну дію скасовано.", reply_markup=main_menu)
-
-
-@dp.message(AIState.chatting)
-async def ai_chat(message: Message, state: FSMContext):
-    query = (message.text or "").strip()
-    if not query:
-        await message.answer("Напишіть питання текстом.", reply_markup=AI_EXIT_KEYBOARD)
-        return
-    menu_labels = {
-        "🍬 Каталог", "🔍 Пошук товару", "🆕 Новинки", "🔥 Хіти",
-        "❤️ Обране", "🕒 Переглянуті", "🛒 Кошик", "🚚 Доставка й оплата",
-        "💬 Менеджер", "🌐 Сайт", "📢 Канал OKVEJ", "❌ Сховати меню",
-    }
-    if query in menu_labels:
-        await state.clear()
-        await message.answer(
-            "AI-помічник закрито. Натисніть потрібну кнопку ще раз.",
-            reply_markup=main_menu,
-        )
-        return
-
-    wait = await message.answer("🤖 Підбираю найкращі варіанти…")
-    try:
-        products = await get_in_stock_products()
-        candidates = ai_candidates(products, query)
-        answer, indices = await ask_openai_sales_assistant(query, candidates)
-        selected = [candidates[index - 1] for index in indices]
-        if not answer:
-            answer = "Уточніть, будь ласка, який смак, бюджет або вид солодощів вас цікавить."
-        keyboard = ai_products_keyboard(selected) if selected else AI_EXIT_KEYBOARD
-        await wait.edit_text(
-            f"🤖 <b>AI-помічник OKVEJ</b>\n\n{html.escape(answer)}",
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
-    except Exception as exc:
-        logging.exception("AI assistant error")
-        detail = str(exc).lower()
-        if "billing" in detail or "quota" in detail or "insufficient" in detail:
-            text = "⚠️ OpenAI API не має доступного балансу або ліміту. Перевірте Billing на платформі OpenAI."
-        elif "api key" in detail or "401" in detail:
-            text = "⚠️ OpenAI API-ключ не прийнято. Перевірте OPENAI_API_KEY у Railway."
-        else:
-            text = "😔 AI тимчасово не відповідає. Спробуйте ще раз або зверніться до менеджера."
-        await wait.edit_text(text, reply_markup=AI_EXIT_KEYBOARD)
-
-
-@dp.callback_query(F.data.startswith("ai_product:"))
-async def ai_product_card(callback: CallbackQuery):
-    key = callback.data.split(":", 1)[1]
-    product = product_cache.get(key)
-    if not product or not is_in_stock(product):
-        await callback.answer("Товар уже недоступний.", show_alert=True)
-        return
-    image = get_image_url(product)
-    if image:
-        await callback.message.answer_photo(
-            photo=image,
-            caption=product_text(product),
-            parse_mode="HTML",
-            reply_markup=product_keyboard(product, callback.from_user.id),
-        )
-    else:
-        await callback.message.answer(
-            product_text(product),
-            parse_mode="HTML",
-            reply_markup=product_keyboard(product, callback.from_user.id),
-        )
-    await callback.answer()
-
-
 def search_results_keyboard(results, query, page):
     page_count = max(
         1,
@@ -2965,6 +2672,7 @@ async def search_start(message: Message, state: FSMContext):
 @dp.message(SearchState.waiting_query)
 async def search_products(message: Message, state: FSMContext):
     query = (message.text or "").strip()
+    track_event("search", message.from_user.id, query=query)
 
     if len(query) < 2:
         await message.answer("Введіть щонайменше 2 символи.")
