@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.7"
-BOT_BUILD = "2026-07-15-storefront-priority-cards"
+BOT_VERSION = "13.8"
+BOT_BUILD = "2026-07-16-three-product-showcase"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -899,7 +899,7 @@ def find_category(products, key: str):
 
 
 
-CATALOG_GRID_PAGE_SIZE = 8
+CATALOG_GRID_PAGE_SIZE = 3
 
 
 def product_badge_prefix(product):
@@ -995,51 +995,114 @@ async def clear_catalog_album(chat_id: int, user_id: int):
             pass
 
 
-async def send_catalog_grid(message, category_title: str, products, category_id: str, page: int, user_id: int):
+async def send_catalog_grid(
+    message,
+    category_title: str,
+    products,
+    category_id: str,
+    page: int,
+    user_id: int,
+):
     total = len(products)
-    page_count = max(1, (total + CATALOG_GRID_PAGE_SIZE - 1) // CATALOG_GRID_PAGE_SIZE)
+    page_count = max(
+        1,
+        (total + CATALOG_GRID_PAGE_SIZE - 1) // CATALOG_GRID_PAGE_SIZE,
+    )
     page = max(0, min(page, page_count - 1))
     start = page * CATALOG_GRID_PAGE_SIZE
     page_items = products[start:start + CATALOG_GRID_PAGE_SIZE]
 
     await clear_catalog_album(message.chat.id, user_id)
-    media = []
+    sent_ids = []
 
-    for offset, product in enumerate(page_items, start=1):
-        image_url = get_image_url(product)
-        if not image_url:
-            continue
+    for product in page_items:
+        key = product_key(product)
+        product_cache[key] = product
 
         title = clean_product_title(localize(product.get("title")))
         price = price_number(product)
         article = product_article(product)
+        image_url = get_image_url(product)
+
         caption = []
 
         if article and article in section_articles("hits"):
             caption.append("🔥 <b>ХІТ ПРОДАЖУ</b>")
+
         if article and article in section_articles("new_products"):
             caption.append("🆕 <b>НОВИНКА</b>")
+
         if article and article in section_articles("recommended"):
             caption.append("⭐ <b>РЕКОМЕНДОВАНО</b>")
 
-        caption.append(
-            f"<b>{offset}. {html.escape(title)}</b>\n"
-            f"💰 <b>{price:g} грн</b>"
-        )
-        media.append(InputMediaPhoto(
-            media=image_url,
-            caption="\n".join(caption),
-            parse_mode="HTML",
-        ))
+        caption.extend([
+            f"🍬 <b>{html.escape(title)}</b>",
+            f"💰 <b>{price:g} грн</b>",
+        ])
 
-    if media:
-        sent = await message.answer_media_group(media=media)
-        user_catalog_album_messages[user_id] = [item.message_id for item in sent]
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="👆 Детальніше",
+                    callback_data=f"catalog_product:{key}:{category_id}:{page}",
+                )
+            ]]
+        )
+
+        if image_url:
+            sent = await message.answer_photo(
+                photo=image_url,
+                caption="\n".join(caption),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        else:
+            sent = await message.answer(
+                "\n".join(caption),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+
+        sent_ids.append(sent.message_id)
+
+    user_catalog_album_messages[user_id] = sent_ids
+
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=f"catalog_grid_page:{category_id}:{page - 1}",
+            )
+        )
+
+    navigation.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{page_count}",
+            callback_data="catalog_noop",
+        )
+    )
+
+    if page + 1 < page_count:
+        navigation.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=f"catalog_grid_page:{category_id}:{page + 1}",
+            )
+        )
 
     await message.answer(
-        catalog_grid_text(category_title, products, page),
+        f"🍬 <b>{category_title}</b> · <b>{total}</b> товарів",
         parse_mode="HTML",
-        reply_markup=catalog_grid_keyboard(products, category_id, page),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                navigation,
+                [InlineKeyboardButton(
+                    text="⬅️ До категорій",
+                    callback_data="catalog_categories",
+                )],
+            ]
+        ),
     )
 
 
@@ -1931,6 +1994,22 @@ async def manual_post_publish(message: Message, state: FSMContext):
     except Exception as e:
         logging.exception("Manual product post error")
         await message.answer(f"❌ Ошибка публикации: {e}")
+
+
+@dp.message(Command("commands"))
+async def commands_handler(message: Message):
+    await message.answer(
+        "⚡ <b>Швидкі команди OKVEJ</b>\n\n"
+        "/start — відкрити головне меню\n"
+        "/menu — оновити клавіатуру\n"
+        "/version — перевірити версію бота\n"
+        "/admin — відкрити адмін-панель\n"
+        "/пост — опублікувати товар у каналі\n"
+        "/myid — показати Telegram ID\n"
+        "/commands — список швидких команд",
+        parse_mode="HTML",
+        reply_markup=main_menu,
+    )
 
 
 @dp.message(Command("menu"))
