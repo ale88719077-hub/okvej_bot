@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "14.0"
-BOT_BUILD = "2026-07-16-quick-buy-catalog"
+BOT_VERSION = "14.1"
+BOT_BUILD = "2026-07-16-manufacturer-filter"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -108,7 +108,10 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="💬 Менеджер"),
             KeyboardButton(text="🌐 Сайт"),
         ],
-        [KeyboardButton(text="📢 Канал OKVEJ")],
+        [
+            KeyboardButton(text="🏭 Виробники"),
+            KeyboardButton(text="📢 Канал OKVEJ"),
+        ],
         [KeyboardButton(text="❌ Сховати меню")],
     ],
     resize_keyboard=True,
@@ -892,7 +895,101 @@ def categories_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+
+def manufacturer_name(product):
+    """Повертає виробника з Horoshop API або визначає його з назви товару."""
+    candidates = [
+        product.get("brand"),
+        product.get("manufacturer"),
+        product.get("producer"),
+        product.get("vendor"),
+        product.get("brand_name"),
+        product.get("manufacturer_name"),
+    ]
+
+    for value in candidates:
+        if isinstance(value, dict):
+            for key in ("title", "name", "value", "ua", "uk", "ru"):
+                text = localize(value.get(key)).strip()
+                if text:
+                    return text
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    text = localize(item.get("title") or item.get("name") or item.get("value")).strip()
+                else:
+                    text = str(item or "").strip()
+                if text:
+                    return text
+        else:
+            text = str(value or "").strip()
+            if text:
+                return text
+
+    title = clean_product_title(localize(product.get("title")))
+    known = (
+        "Roshen", "Millennium", "AVK", "АВК", "Konti", "Конті",
+        "Lubimov", "Любимов", "Rosso", "Demi", "DEMI", "ADC Sweets",
+        "Prestige", "Tayas", "Elvan", "Ulker", "Ülker", "Eti",
+        "Kinder", "Ferrero", "Nestle", "Nestlé", "Mars", "Snickers",
+        "Twix", "Bounty", "Mentos", "Haribo", "Bebeto", "Bonart",
+    )
+    lower = title.lower()
+    for brand in known:
+        if brand.lower() in lower:
+            return brand
+    return "Інші виробники"
+
+
+def manufacturer_key(name: str) -> str:
+    return "m" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:9]
+
+
+def grouped_manufacturers(products):
+    groups = {}
+    for product in products:
+        name = manufacturer_name(product)
+        groups.setdefault(name, []).append(product)
+    for name in groups:
+        groups[name] = sorted(groups[name], key=product_storefront_sort_key)
+    return dict(sorted(groups.items(), key=lambda item: (item[0] == "Інші виробники", item[0].lower())))
+
+
+MANUFACTURER_PAGE_SIZE = 12
+
+
+def manufacturers_keyboard(products, page: int = 0) -> InlineKeyboardMarkup:
+    groups = list(grouped_manufacturers(products).items())
+    total = len(groups)
+    page_count = max(1, (total + MANUFACTURER_PAGE_SIZE - 1) // MANUFACTURER_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * MANUFACTURER_PAGE_SIZE
+    rows = []
+    for name, items in groups[start:start + MANUFACTURER_PAGE_SIZE]:
+        rows.append([InlineKeyboardButton(
+            text=f"🏭 {name[:35]} ({len(items)})",
+            callback_data=f"manufacturer:{manufacturer_key(name)}",
+        )])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"manufacturers_page:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{page_count}", callback_data="catalog_noop"))
+    if page + 1 < page_count:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"manufacturers_page:{page+1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🍬 До категорій", callback_data="catalog_categories")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def find_manufacturer(products, key: str):
+    for name, items in grouped_manufacturers(products).items():
+        if manufacturer_key(name) == key:
+            return name, items
+    return None, []
+
 def find_category(products, key: str):
+    if key.startswith("m"):
+        return find_manufacturer(products, key)
     for name, items in grouped_categories(products).items():
         if category_key(name) == key:
             return name, items
@@ -1103,8 +1200,8 @@ async def send_catalog_grid(
             inline_keyboard=[
                 navigation,
                 [InlineKeyboardButton(
-                    text="⬅️ До категорій",
-                    callback_data="catalog_categories",
+                    text="⬅️ До виробників" if category_id.startswith("m") else "⬅️ До категорій",
+                    callback_data="catalog_manufacturers" if category_id.startswith("m") else "catalog_categories",
                 )],
             ]
         ),
@@ -2084,6 +2181,69 @@ async def delivery(message: Message):
     )
 
 
+
+@dp.message(F.text == "🏭 Виробники")
+async def manufacturers(message: Message):
+    loading = await message.answer("⏳ Завантажую виробників...")
+    try:
+        products = await get_in_stock_products()
+        groups = grouped_manufacturers(products)
+        await loading.edit_text(
+            "🏭 <b>Виробники</b>\n\n"
+            f"Доступно брендів: <b>{len(groups)}</b>\n"
+            "Оберіть виробника:",
+            parse_mode="HTML",
+            reply_markup=manufacturers_keyboard(products, 0),
+        )
+    except Exception:
+        logging.exception("Manufacturers loading error")
+        await loading.edit_text("❌ Не вдалося відкрити список виробників.")
+
+
+@dp.callback_query(F.data == "catalog_manufacturers")
+async def catalog_manufacturers(callback: CallbackQuery):
+    products = await get_in_stock_products()
+    groups = grouped_manufacturers(products)
+    await callback.message.edit_text(
+        "🏭 <b>Виробники</b>\n\n"
+        f"Доступно брендів: <b>{len(groups)}</b>\n"
+        "Оберіть виробника:",
+        parse_mode="HTML",
+        reply_markup=manufacturers_keyboard(products, 0),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("manufacturers_page:"))
+async def manufacturers_page(callback: CallbackQuery):
+    page = int(callback.data.split(":", 1)[1])
+    products = await get_in_stock_products()
+    await callback.message.edit_text(
+        "🏭 <b>Виробники</b>\n\nОберіть виробника:",
+        parse_mode="HTML",
+        reply_markup=manufacturers_keyboard(products, page),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("manufacturer:"))
+async def manufacturer_products(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    products = await get_in_stock_products()
+    name, items = find_manufacturer(products, key)
+    if not items:
+        await callback.answer("Виробника не знайдено.", show_alert=True)
+        return
+    await send_catalog_grid(
+        callback.message,
+        f"🏭 {name}",
+        items,
+        key,
+        0,
+        callback.from_user.id,
+    )
+    await callback.answer()
+
 @dp.message(F.text == "🍬 Каталог")
 async def catalog(message: Message):
     loading = await message.answer("⏳ Завантажую каталог...")
@@ -2293,7 +2453,7 @@ async def catalog_product(callback: CallbackQuery):
             product,
             callback.from_user.id,
             InlineKeyboardButton(
-                text="⬅️ Назад до категорії",
+                text="⬅️ Назад до виробника" if category_id.startswith("m") else "⬅️ Назад до категорії",
                 callback_data=f"catalog_grid_page:{category_id}:{page}",
             ),
         )
