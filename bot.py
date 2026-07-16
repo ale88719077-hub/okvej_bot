@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "14.1"
-BOT_BUILD = "2026-07-16-manufacturer-filter"
+BOT_VERSION = "14.2"
+BOT_BUILD = "2026-07-16-card-design-no-manufacturers"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -108,10 +108,7 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="💬 Менеджер"),
             KeyboardButton(text="🌐 Сайт"),
         ],
-        [
-            KeyboardButton(text="🏭 Виробники"),
-            KeyboardButton(text="📢 Канал OKVEJ"),
-        ],
+        [KeyboardButton(text="📢 Канал OKVEJ")],
         [KeyboardButton(text="❌ Сховати меню")],
     ],
     resize_keyboard=True,
@@ -1133,9 +1130,17 @@ async def send_catalog_grid(
         if article and article in section_articles("recommended"):
             caption.append("⭐ <b>РЕКОМЕНДОВАНО</b>")
 
+        brand = manufacturer_name(product)
+        if brand == "Інші виробники":
+            brand = ""
+
+        caption.append(f"🍬 <b>{html.escape(title)}</b>")
+        if brand:
+            caption.append(f"🏷️ {html.escape(brand)}")
         caption.extend([
-            f"🍬 <b>{html.escape(title)}</b>",
+            "",
             f"💰 <b>{price:g} грн</b>",
+            "✅ В наявності",
         ])
 
         keyboard = InlineKeyboardMarkup(
@@ -1541,10 +1546,16 @@ def product_text(product):
         lines.extend(badges)
         lines.append("")
 
+    brand = manufacturer_name(product)
+    if brand == "Інші виробники":
+        brand = ""
+
+    lines.append(f"🍬 <b>{html.escape(title)}</b>")
+    if brand:
+        lines.append(f"🏷️ Бренд: <b>{html.escape(brand)}</b>")
     lines.extend([
-        f"🍬 <b>{html.escape(title)}</b>",
         "",
-        f"💰 Ціна: <b>{price:g} грн</b>",
+        f"💰 <b>Ціна: {price:g} грн</b>",
     ])
 
     if weight:
@@ -2181,68 +2192,6 @@ async def delivery(message: Message):
     )
 
 
-
-@dp.message(F.text == "🏭 Виробники")
-async def manufacturers(message: Message):
-    loading = await message.answer("⏳ Завантажую виробників...")
-    try:
-        products = await get_in_stock_products()
-        groups = grouped_manufacturers(products)
-        await loading.edit_text(
-            "🏭 <b>Виробники</b>\n\n"
-            f"Доступно брендів: <b>{len(groups)}</b>\n"
-            "Оберіть виробника:",
-            parse_mode="HTML",
-            reply_markup=manufacturers_keyboard(products, 0),
-        )
-    except Exception:
-        logging.exception("Manufacturers loading error")
-        await loading.edit_text("❌ Не вдалося відкрити список виробників.")
-
-
-@dp.callback_query(F.data == "catalog_manufacturers")
-async def catalog_manufacturers(callback: CallbackQuery):
-    products = await get_in_stock_products()
-    groups = grouped_manufacturers(products)
-    await callback.message.edit_text(
-        "🏭 <b>Виробники</b>\n\n"
-        f"Доступно брендів: <b>{len(groups)}</b>\n"
-        "Оберіть виробника:",
-        parse_mode="HTML",
-        reply_markup=manufacturers_keyboard(products, 0),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("manufacturers_page:"))
-async def manufacturers_page(callback: CallbackQuery):
-    page = int(callback.data.split(":", 1)[1])
-    products = await get_in_stock_products()
-    await callback.message.edit_text(
-        "🏭 <b>Виробники</b>\n\nОберіть виробника:",
-        parse_mode="HTML",
-        reply_markup=manufacturers_keyboard(products, page),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("manufacturer:"))
-async def manufacturer_products(callback: CallbackQuery):
-    key = callback.data.split(":", 1)[1]
-    products = await get_in_stock_products()
-    name, items = find_manufacturer(products, key)
-    if not items:
-        await callback.answer("Виробника не знайдено.", show_alert=True)
-        return
-    await send_catalog_grid(
-        callback.message,
-        f"🏭 {name}",
-        items,
-        key,
-        0,
-        callback.from_user.id,
-    )
-    await callback.answer()
 
 @dp.message(F.text == "🍬 Каталог")
 async def catalog(message: Message):
