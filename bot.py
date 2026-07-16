@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.9"
-BOT_BUILD = "2026-07-16-three-product-showcase"
+BOT_VERSION = "14.0"
+BOT_BUILD = "2026-07-16-quick-buy-catalog"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1046,7 +1046,11 @@ async def send_catalog_grid(
                 InlineKeyboardButton(
                     text="👆 Детальніше",
                     callback_data=f"catalog_product:{key}:{category_id}:{page}",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="🛒 Купити",
+                    callback_data=f"add:{key}",
+                ),
             ]]
         )
 
