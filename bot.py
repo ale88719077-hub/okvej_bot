@@ -25,7 +25,7 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "15.0"
+BOT_VERSION = "15.0.1"
 BOT_BUILD = "2026-07-16-openai-sales-assistant"
 
 logging.basicConfig(level=logging.INFO)
@@ -2645,7 +2645,7 @@ AI_EXIT_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
 
 def ai_product_summary(product, index):
     title = clean_product_title(localize(product.get("title")))
-    description = clean_text(
+    description = clean_product_description(
         localize(product.get("short_description") or product.get("description") or "")
     )[:180]
     article = product_article(product)
