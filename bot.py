@@ -18,14 +18,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto,
+    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, ReplyKeyboardRemove,
 )
 
 from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.8"
+BOT_VERSION = "13.9"
 BOT_BUILD = "2026-07-16-three-product-showcase"
 
 logging.basicConfig(level=logging.INFO)
@@ -109,6 +109,7 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🌐 Сайт"),
         ],
         [KeyboardButton(text="📢 Канал OKVEJ")],
+        [KeyboardButton(text="❌ Сховати меню")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -2002,6 +2003,7 @@ async def commands_handler(message: Message):
         "⚡ <b>Швидкі команди OKVEJ</b>\n\n"
         "/start — відкрити головне меню\n"
         "/menu — оновити клавіатуру\n"
+        "/hide — сховати клавіатуру\n"
         "/version — перевірити версію бота\n"
         "/admin — відкрити адмін-панель\n"
         "/пост — опублікувати товар у каналі\n"
@@ -2013,10 +2015,29 @@ async def commands_handler(message: Message):
 
 
 @dp.message(Command("menu"))
-async def menu_command(message: Message):
+async def menu_command(message: Message, state: FSMContext):
+    await state.clear()
     await message.answer(
         "✅ Головне меню оновлено.",
         reply_markup=main_menu,
+    )
+
+
+@dp.message(Command("hide"))
+async def hide_menu_command(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "✅ Меню приховано. Щоб повернути його, надішліть /menu.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@dp.message(F.text == "❌ Сховати меню")
+async def hide_menu_button(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "✅ Меню приховано. Щоб повернути його, надішліть /menu.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
