@@ -25,8 +25,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "14.2"
-BOT_BUILD = "2026-07-16-card-design-no-manufacturers"
+BOT_VERSION = "15.0"
+BOT_BUILD = "2026-07-16-openai-sales-assistant"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -40,6 +40,9 @@ BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
 ADMIN_USER_ID = (os.getenv("ADMIN_USER_ID") or "").strip()
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-5.6-luna").strip()
+OPENAI_API_URL = "https://api.openai.com/v1/responses"
 
 ADMIN_DATA_PATH = Path(
     os.getenv("ADMIN_DATA_PATH", "/data/admin_data.json")
@@ -71,6 +74,10 @@ CATALOG_CACHE_SECONDS = 600
 
 class SearchState(StatesGroup):
     waiting_query = State()
+
+
+class AIState(StatesGroup):
+    chatting = State()
 
 
 class PostState(StatesGroup):
@@ -105,10 +112,13 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🚚 Доставка й оплата"),
         ],
         [
+            KeyboardButton(text="🤖 AI Помічник"),
             KeyboardButton(text="💬 Менеджер"),
-            KeyboardButton(text="🌐 Сайт"),
         ],
-        [KeyboardButton(text="📢 Канал OKVEJ")],
+        [
+            KeyboardButton(text="🌐 Сайт"),
+            KeyboardButton(text="📢 Канал OKVEJ"),
+        ],
         [KeyboardButton(text="❌ Сховати меню")],
     ],
     resize_keyboard=True,
@@ -2614,6 +2624,271 @@ def search_products_ranked(products, query):
     )
 
     return [product for _, product in scored]
+
+
+
+AI_HELP_TEXT = (
+    "🤖 <b>AI-помічник OKVEJ</b>\n\n"
+    "Напишіть звичайними словами, що ви шукаєте. Наприклад:\n"
+    "• цукерки з арахісом до 300 грн\n"
+    "• подарунок дитині до 800 грн\n"
+    "• щось шоколадне до кави\n"
+    "• як оформити замовлення\n\n"
+    "Я підберу лише товари, які зараз є в наявності."
+)
+
+AI_EXIT_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+    text="❌ Завершити розмову з AI",
+    callback_data="ai_exit",
+)]])
+
+
+def ai_product_summary(product, index):
+    title = clean_product_title(localize(product.get("title")))
+    description = clean_text(
+        localize(product.get("short_description") or product.get("description") or "")
+    )[:180]
+    article = product_article(product)
+    price = price_number(product)
+    parts = [f"{index}. {title}", f"ціна {price:g} грн"]
+    if article:
+        parts.append(f"артикул {article}")
+    if description:
+        parts.append(description)
+    return " | ".join(parts)
+
+
+def ai_candidate_score(product, query):
+    normalized = normalize_search_text(query)
+    words = [w for w in normalized.split() if len(w) >= 3]
+    searchable = normalize_search_text(" ".join([
+        localize(product.get("title")),
+        localize(product.get("short_description")),
+        localize(product.get("description")),
+        str(product.get("article") or ""),
+    ]))
+    score = product_search_score(product, query)
+    for word in words:
+        if word in searchable:
+            score += 180
+    price_match = re.search(r"(?:до|менше|не дорожче|до бюджету)\s*(\d{2,5})", normalized)
+    if price_match:
+        limit = float(price_match.group(1))
+        price = price_number(product)
+        if price <= limit:
+            score += 350
+        else:
+            score -= min(900, int(price - limit) * 3)
+    article = product_article(product)
+    if article in section_articles("hits"):
+        score += 90
+    if article in section_articles("new_products"):
+        score += 60
+    if article in section_articles("recommended"):
+        score += 70
+    return score
+
+
+def ai_candidates(products, query, limit=24):
+    ranked = sorted(
+        products,
+        key=lambda product: (
+            -ai_candidate_score(product, query),
+            price_number(product),
+            clean_product_title(localize(product.get("title"))).lower(),
+        ),
+    )
+    return ranked[:limit]
+
+
+def extract_openai_text(data):
+    for item in data.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if content.get("type") == "output_text" and content.get("text"):
+                return content["text"].strip()
+    return ""
+
+
+async def ask_openai_sales_assistant(query, candidates):
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+
+    catalog = "\n".join(
+        ai_product_summary(product, index)
+        for index, product in enumerate(candidates, start=1)
+    )
+    instructions = (
+        "Ти — ввічливий продавець-консультант українського магазину солодощів OKVEJ. "
+        "Відповідай українською, коротко та практично. "
+        "Не вигадуй товари, ціни, наявність, умови доставки чи оплати. "
+        "Рекомендуй тільки товари з переданого списку. "
+        "Якщо покупець питає, як оформити замовлення, поясни: додати товар у кошик, "
+        "відкрити «🛒 Кошик», натиснути «Оформити замовлення» та заповнити дані. "
+        "Якщо даних недостатньо, постав одне уточнювальне питання. "
+        "Поверни СУВОРО JSON без markdown у форматі: "
+        '{"answer":"текст відповіді","selected_indices":[1,2,3]}. '
+        "selected_indices — максимум 5 номерів зі списку; для загального питання або оформлення може бути порожнім."
+    )
+    user_input = f"Запит покупця: {query}\n\nТовари в наявності:\n{catalog}"
+    payload = {
+        "model": OPENAI_MODEL,
+        "instructions": instructions,
+        "input": user_input,
+        "max_output_tokens": 700,
+        "store": False,
+    }
+    timeout = aiohttp.ClientTimeout(total=45)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            OPENAI_API_URL,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+        ) as response:
+            data = await response.json(content_type=None)
+            if response.status >= 400:
+                message = data.get("error", {}).get("message") or str(data)
+                raise RuntimeError(f"OpenAI API error {response.status}: {message}")
+
+    raw = extract_openai_text(data)
+    if not raw:
+        raise RuntimeError("OpenAI returned empty response")
+    raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw[:3500], []
+    answer = str(parsed.get("answer") or "").strip()[:3500]
+    selected = []
+    for value in parsed.get("selected_indices", []):
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= index <= len(candidates) and index not in selected:
+            selected.append(index)
+        if len(selected) >= 5:
+            break
+    return answer, selected
+
+
+def ai_products_keyboard(products):
+    rows = []
+    for product in products:
+        key = product_key(product)
+        product_cache[key] = product
+        title = clean_product_title(localize(product.get("title")))
+        price = price_number(product)
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🍬 {title[:28]} · {price:g} грн",
+                callback_data=f"ai_product:{key}",
+            ),
+            InlineKeyboardButton(
+                text="🛒",
+                callback_data=f"add:{key}",
+            ),
+        ])
+    rows.append([InlineKeyboardButton(text="❌ Завершити AI", callback_data="ai_exit")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(Command("ai"))
+@dp.message(F.text == "🤖 AI Помічник")
+async def ai_start(message: Message, state: FSMContext):
+    if not OPENAI_API_KEY:
+        await message.answer(
+            "⚠️ AI ще не підключено. Перевірте змінну OPENAI_API_KEY у Railway."
+        )
+        return
+    await state.set_state(AIState.chatting)
+    await message.answer(AI_HELP_TEXT, parse_mode="HTML", reply_markup=AI_EXIT_KEYBOARD)
+
+
+@dp.callback_query(F.data == "ai_exit")
+async def ai_exit(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("✅ AI-помічник завершив розмову.", reply_markup=main_menu)
+    await callback.answer()
+
+
+@dp.message(Command("cancel"))
+async def cancel_dialog(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("✅ Поточну дію скасовано.", reply_markup=main_menu)
+
+
+@dp.message(AIState.chatting)
+async def ai_chat(message: Message, state: FSMContext):
+    query = (message.text or "").strip()
+    if not query:
+        await message.answer("Напишіть питання текстом.", reply_markup=AI_EXIT_KEYBOARD)
+        return
+    menu_labels = {
+        "🍬 Каталог", "🔍 Пошук товару", "🆕 Новинки", "🔥 Хіти",
+        "❤️ Обране", "🕒 Переглянуті", "🛒 Кошик", "🚚 Доставка й оплата",
+        "💬 Менеджер", "🌐 Сайт", "📢 Канал OKVEJ", "❌ Сховати меню",
+    }
+    if query in menu_labels:
+        await state.clear()
+        await message.answer(
+            "AI-помічник закрито. Натисніть потрібну кнопку ще раз.",
+            reply_markup=main_menu,
+        )
+        return
+
+    wait = await message.answer("🤖 Підбираю найкращі варіанти…")
+    try:
+        products = await get_in_stock_products()
+        candidates = ai_candidates(products, query)
+        answer, indices = await ask_openai_sales_assistant(query, candidates)
+        selected = [candidates[index - 1] for index in indices]
+        if not answer:
+            answer = "Уточніть, будь ласка, який смак, бюджет або вид солодощів вас цікавить."
+        keyboard = ai_products_keyboard(selected) if selected else AI_EXIT_KEYBOARD
+        await wait.edit_text(
+            f"🤖 <b>AI-помічник OKVEJ</b>\n\n{html.escape(answer)}",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    except Exception as exc:
+        logging.exception("AI assistant error")
+        detail = str(exc).lower()
+        if "billing" in detail or "quota" in detail or "insufficient" in detail:
+            text = "⚠️ OpenAI API не має доступного балансу або ліміту. Перевірте Billing на платформі OpenAI."
+        elif "api key" in detail or "401" in detail:
+            text = "⚠️ OpenAI API-ключ не прийнято. Перевірте OPENAI_API_KEY у Railway."
+        else:
+            text = "😔 AI тимчасово не відповідає. Спробуйте ще раз або зверніться до менеджера."
+        await wait.edit_text(text, reply_markup=AI_EXIT_KEYBOARD)
+
+
+@dp.callback_query(F.data.startswith("ai_product:"))
+async def ai_product_card(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    product = product_cache.get(key)
+    if not product or not is_in_stock(product):
+        await callback.answer("Товар уже недоступний.", show_alert=True)
+        return
+    image = get_image_url(product)
+    if image:
+        await callback.message.answer_photo(
+            photo=image,
+            caption=product_text(product),
+            parse_mode="HTML",
+            reply_markup=product_keyboard(product, callback.from_user.id),
+        )
+    else:
+        await callback.message.answer(
+            product_text(product),
+            parse_mode="HTML",
+            reply_markup=product_keyboard(product, callback.from_user.id),
+        )
+    await callback.answer()
 
 
 def search_results_keyboard(results, query, page):
