@@ -26,8 +26,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "14.0"
-BOT_BUILD = "2026-07-17-channel-subscription-onboarding"
+BOT_VERSION = "14.1"
+BOT_BUILD = "2026-07-17-collapse-product-card"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -2363,6 +2363,40 @@ async def catalog_category(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data.startswith("collapse_product:"))
+async def collapse_product_card(callback: CallbackQuery):
+    try:
+        _, category_id, page_text = callback.data.split(":", 2)
+        products = await get_in_stock_products()
+        title, category_products = find_category(products, category_id)
+
+        if not category_products:
+            await callback.answer("Категорію не знайдено.", show_alert=True)
+            return
+
+        try:
+            await callback.message.delete()
+        except Exception:
+            logging.exception("Could not delete product card")
+
+        await send_catalog_grid(
+            callback.message,
+            title,
+            category_products,
+            category_id,
+            int(page_text),
+            callback.from_user.id,
+        )
+        await callback.answer()
+
+    except Exception:
+        logging.exception("Collapse product card error")
+        await callback.answer(
+            "Не вдалося згорнути картку.",
+            show_alert=True,
+        )
+
+
 @dp.callback_query(F.data.startswith("catalog_grid_page:"))
 async def catalog_grid_page(callback: CallbackQuery):
     try:
@@ -2461,8 +2495,8 @@ async def catalog_product(callback: CallbackQuery):
             product,
             callback.from_user.id,
             InlineKeyboardButton(
-                text="⬅️ Назад до категорії",
-                callback_data=f"catalog_grid_page:{category_id}:{page}",
+                text="➖ Згорнути",
+                callback_data=f"collapse_product:{category_id}:{page}",
             ),
         )
 
