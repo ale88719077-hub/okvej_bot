@@ -26,8 +26,8 @@ from html.parser import HTMLParser
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "13.9"
-BOT_BUILD = "2026-07-16-built-in-analytics"
+BOT_VERSION = "14.0"
+BOT_BUILD = "2026-07-17-channel-subscription-onboarding"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -91,6 +91,41 @@ class CheckoutState(StatesGroup):
     waiting_branch = State()
     waiting_comment = State()
     waiting_confirm = State()
+
+
+def channel_public_url():
+    username = CHANNEL_USERNAME.strip()
+    if username.startswith("https://t.me/"):
+        return username
+    return f"https://t.me/{username.lstrip('@')}"
+
+
+def subscription_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Підписатися", url=channel_public_url())],
+        [InlineKeyboardButton(text="✅ Я підписався", callback_data="subscription_check")],
+        [InlineKeyboardButton(text="➡️ Продовжити без підписки", callback_data="subscription_skip")],
+    ])
+
+
+def subscription_welcome_text():
+    return (
+        "🍬 <b>Ласкаво просимо до OKVEJ!</b>\n\n"
+        "📢 Підпишіться на наш канал, щоб першими дізнаватися про:\n\n"
+        "🔥 акції\n"
+        "🆕 новинки\n"
+        "📦 нові надходження\n\n"
+        "Після підписки натисніть кнопку <b>«✅ Я підписався»</b>."
+    )
+
+
+async def user_is_channel_member(user_id: int):
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        return member.status in {"member", "administrator", "creator", "restricted"}
+    except Exception:
+        logging.exception("Could not check channel subscription for user %s", user_id)
+        return None
 
 
 main_menu = ReplyKeyboardMarkup(
@@ -257,7 +292,7 @@ def top_items(mapping, metric=None, limit=5):
 
 def analytics_report(data,title):
     e=data.get("events",{}); users=data.get("users",[]); products=data.get("products",{}); searches=data.get("searches",{})
-    lines=[f"📊 <b>{title}</b>","",f"👥 Користувачів: <b>{len(users)}</b>",f"▶️ Запусків: <b>{e.get('start',0)}</b>",f"🍬 Відкриттів каталогу: <b>{e.get('catalog_open',0)}</b>",f"🔍 Пошуків: <b>{e.get('search',0)}</b>",f"👆 Переглядів товарів: <b>{e.get('product_view',0)}</b>",f"🛒 Додавань у кошик: <b>{e.get('cart_add',0)}</b>",f"❤️ Додавань в обране: <b>{e.get('favorite_add',0)}</b>",f"✅ Початих оформлень: <b>{e.get('checkout_start',0)}</b>",f"📢 Публікацій у канал: <b>{e.get('channel_post',0)}</b>"]
+    lines=[f"📊 <b>{title}</b>","",f"👥 Користувачів: <b>{len(users)}</b>",f"▶️ Запусків: <b>{e.get('start',0)}</b>",f"🍬 Відкриттів каталогу: <b>{e.get('catalog_open',0)}</b>",f"🔍 Пошуків: <b>{e.get('search',0)}</b>",f"👆 Переглядів товарів: <b>{e.get('product_view',0)}</b>",f"🛒 Додавань у кошик: <b>{e.get('cart_add',0)}</b>",f"❤️ Додавань в обране: <b>{e.get('favorite_add',0)}</b>",f"✅ Початих оформлень: <b>{e.get('checkout_start',0)}</b>",f"📢 Публікацій у канал: <b>{e.get('channel_post',0)}</b>","","📈 <b>Підписка через бота:</b>",f"👀 Показів пропозиції: <b>{e.get('subscription_offer',0)}</b>",f"🔎 Перевірок підписки: <b>{e.get('subscription_check',0)}</b>",f"✅ Підтверджених підписок: <b>{e.get('subscription_confirmed',0)}</b>",f"⏭️ Продовжили без підписки: <b>{e.get('subscription_skip',0)}</b>"]
     tp=top_items(products,"views",5)
     if tp:
         lines += ["","🔥 <b>Топ товарів:</b>"]+[f"{i}. {html.escape(str(label)[:70])} — {score}" for i,(label,score) in enumerate(tp,1)]
@@ -2147,10 +2182,52 @@ async def version_handler(message: Message):
 @dp.message(CommandStart())
 async def start(message: Message):
     track_event("start", message.from_user.id)
+    track_event("subscription_offer", message.from_user.id)
+    await message.answer(
+        subscription_welcome_text(),
+        parse_mode="HTML",
+        reply_markup=subscription_keyboard(),
+    )
 
-    await message.answer("🍬 <b>Вітаємо в OKVEJ!</b>", parse_mode="HTML", reply_markup=main_menu)
+
+@dp.callback_query(F.data == "subscription_check")
+async def subscription_check(callback: CallbackQuery):
+    track_event("subscription_check", callback.from_user.id)
+    subscribed = await user_is_channel_member(callback.from_user.id)
+
+    if subscribed is True:
+        track_event("subscription_confirmed", callback.from_user.id)
+        await callback.answer("✅ Підписку підтверджено!")
+        await callback.message.answer(
+            "✅ <b>Дякуємо за підписку!</b>\n\nКаталог OKVEJ відкрито 👇",
+            parse_mode="HTML",
+            reply_markup=main_menu,
+        )
+        return
+
+    if subscribed is None:
+        await callback.answer(
+            "Не вдалося перевірити підписку. Можна продовжити без неї.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer(
+        "Підписку поки не знайдено. Підпишіться на канал і повторіть перевірку.",
+        show_alert=True,
+    )
 
 
+@dp.callback_query(F.data == "subscription_skip")
+async def subscription_skip(callback: CallbackQuery):
+    track_event("subscription_skip", callback.from_user.id)
+    await callback.answer()
+    await callback.message.answer(
+        "🍬 <b>Головне меню OKVEJ</b>\n\n"
+        "Ви можете користуватися каталогом без підписки.",
+        parse_mode="HTML",
+        reply_markup=main_menu,
+    )
 
 
 @dp.message(Command("myid"))
@@ -3025,7 +3102,7 @@ async def manager(message: Message):
 
 @dp.message(F.text == "📢 Канал OKVEJ")
 async def channel(message: Message):
-    await message.answer("https://t.me/okvej")
+    await message.answer(channel_public_url())
 
 
 async def main():

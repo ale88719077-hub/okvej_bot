@@ -1,7 +1,7 @@
-# OKVEJ Telegram Bot v13.9
+# OKVEJ Telegram Bot v14.0
 
-- /analytics — за весь час
-- /analytics_today — за сьогодні
-- /analytics_reset — очистити
-- топ товарів і пошукових запитів
-- ANALYTICS_DATA_PATH=/data/analytics_data.json
+При /start бот предлагает подписаться на канал, проверить подписку или продолжить без подписки. В аналитике учитываются показы, проверки, подтверждения и пропуски.
+
+Railway: CHANNEL_USERNAME=@okvej
+
+Для проверки подписки бот должен быть администратором канала.
