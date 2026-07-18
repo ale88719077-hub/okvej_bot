@@ -1,3 +1,7 @@
+# OKVEJ Bot v18.2 — Brand Mini App
+
+Фірмовий Mini App: брендова шапка, каталог, кнопка сайту, подарункові набори та збільшені фото.
+
 # OKVEJ Bot + Telegram Mini App v16.0
 
 ## Railway variables
