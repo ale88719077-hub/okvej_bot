@@ -27,8 +27,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "17.0"
-BOT_BUILD = "2026-07-18-mini-app-single-row"
+BOT_VERSION = "17.3"
+BOT_BUILD = "2026-07-18-candy-gift-recommendations"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -3179,7 +3179,7 @@ function render(){
  app.innerHTML=`<div class="shell">${hero()}${body}</div>${bottom()}`;
  bind();
 }
-function home(){const c=counts();const popular=Object.entries(c).sort((a,b)=>b[1]-a[1]).slice(0,4);return `<div class="home-grid"><button class="home-tile" data-home="catalog">📂<b>Каталог</b><span>Усі товари</span></button><button class="home-tile" data-home="favorites">❤️<b>Обране</b><span>${state.favorites.size} товарів</span></button><button class="home-tile" data-home="recent">🕓<b>Переглянуті</b><span>${state.recent.length} товарів</span></button><button class="home-tile" data-home="cart">🛒<b>Кошик</b><span>${cartCount()} товарів</span></button></div><div class="section-head"><h2>Популярні категорії</h2></div><div class="home-grid">${popular.map(([name,n])=>`<button class="home-tile" data-cat-home="${esc(name)}">🍬<b>${esc(name)}</b><span>${n} товарів</span></button>`).join('')}</div><div class="section-head"><h2>Рекомендуємо</h2><div class="count-label">для вас</div></div><div class="list">${state.products.slice(0,6).map(card).join('')}</div>`}
+function home(){const c=counts();const popular=Object.entries(c).sort((a,b)=>b[1]-a[1]).slice(0,4);const recommendedCandies=state.products.filter(p=>{const c=String(p.category||'').toLowerCase();return c.startsWith('цукерк')||c.startsWith('подарункові набори')}).sort((a,b)=>Number(b.price||0)-Number(a.price||0)).slice(0,6);return `<div class="home-grid"><button class="home-tile" data-home="catalog">📂<b>Каталог</b><span>Усі товари</span></button><button class="home-tile" data-home="favorites">❤️<b>Обране</b><span>${state.favorites.size} товарів</span></button><button class="home-tile" data-home="recent">🕓<b>Переглянуті</b><span>${state.recent.length} товарів</span></button><button class="home-tile" data-home="cart">🛒<b>Кошик</b><span>${cartCount()} товарів</span></button></div><div class="section-head"><h2>Популярні категорії</h2></div><div class="home-grid">${popular.map(([name,n])=>`<button class="home-tile" data-cat-home="${esc(name)}">🍬<b>${esc(name)}</b><span>${n} товарів</span></button>`).join('')}</div><div class="section-head"><h2>💎 Цукерки та подарункові набори</h2><div class="count-label">преміум</div></div><div class="list">${recommendedCandies.map(card).join('')||'<div class="empty">Цукерки та подарункові набори не знайдено</div>'}</div>`}
 function bind(){
  document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{const m=b.dataset.nav;if(m==='search'){state.mode='catalog';state.category='Усі';render();setTimeout(()=>document.querySelector('#search')?.focus(),50)}else if(m==='cart'){openCart()}else{state.mode=m;state.category='Усі';render()}});
  document.querySelectorAll('[data-home]').forEach(b=>b.onclick=()=>{const m=b.dataset.home;if(m==='cart')openCart();else if(m==='recent')openRecent();else{state.mode=m;render()}});
