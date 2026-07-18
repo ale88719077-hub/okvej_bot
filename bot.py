@@ -27,8 +27,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "18.1"
-BOT_BUILD = "2026-07-18-home-catalog-buttons"
+BOT_VERSION = "18.3"
+BOT_BUILD = "2026-07-18-menu-order-site-top-store-bottom"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -133,9 +133,7 @@ async def user_is_channel_member(user_id: int):
 
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [
-            KeyboardButton(text="🛍 Відкрити магазин", web_app=WebAppInfo(url=MINI_APP_URL)) if MINI_APP_URL else KeyboardButton(text="🛍 Відкрити магазин"),
-        ],
+        [KeyboardButton(text="🌐 Сайт")],
         [
             KeyboardButton(text="🍬 Каталог"),
             KeyboardButton(text="🔍 Пошук товару"),
@@ -154,9 +152,11 @@ main_menu = ReplyKeyboardMarkup(
         ],
         [
             KeyboardButton(text="💬 Менеджер"),
-            KeyboardButton(text="🌐 Сайт"),
+            KeyboardButton(text="📢 Канал OKVEJ"),
         ],
-        [KeyboardButton(text="📢 Канал OKVEJ")],
+        [
+            KeyboardButton(text="🛍 Відкрити магазин", web_app=WebAppInfo(url=MINI_APP_URL)) if MINI_APP_URL else KeyboardButton(text="🛍 Відкрити магазин"),
+        ],
     ],
     resize_keyboard=True,
     is_persistent=True,
