@@ -19,15 +19,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto,
+    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, WebAppInfo,
 )
 
 from html.parser import HTMLParser
+from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "14.1"
-BOT_BUILD = "2026-07-17-collapse-product-card"
+BOT_VERSION = "16.0"
+BOT_BUILD = "2026-07-18-mini-app-mvp"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -41,6 +42,8 @@ BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
 MANAGER_CHAT_ID = (os.getenv("MANAGER_CHAT_ID") or "").strip()
 ADMIN_USER_ID = (os.getenv("ADMIN_USER_ID") or "").strip()
+MINI_APP_URL = (os.getenv("MINI_APP_URL") or "").strip()
+PORT = int(os.getenv("PORT", "8080"))
 
 ADMIN_DATA_PATH = Path(
     os.getenv("ADMIN_DATA_PATH", "/data/admin_data.json")
@@ -130,6 +133,9 @@ async def user_is_channel_member(user_id: int):
 
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
+        [
+            KeyboardButton(text="🛍 Відкрити магазин", web_app=WebAppInfo(url=MINI_APP_URL)) if MINI_APP_URL else KeyboardButton(text="🛍 Відкрити магазин"),
+        ],
         [
             KeyboardButton(text="🍬 Каталог"),
             KeyboardButton(text="🔍 Пошук товару"),
@@ -3139,10 +3145,134 @@ async def channel(message: Message):
     await message.answer(channel_public_url())
 
 
+
+MINI_APP_HTML = r"""
+<div id="app"></div>
+<style>
+:root{color-scheme:light dark}*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--tg-theme-bg-color,#f4f8fb);color:var(--tg-theme-text-color,#17212b)}button,input{font:inherit}.shell{max-width:760px;margin:auto;padding:12px 12px 92px}.hero{background:linear-gradient(135deg,#5bbdf5,#168bd2);color:white;padding:18px;border-radius:20px;margin-bottom:12px}.hero h1{margin:0 0 5px;font-size:25px}.hero p{margin:0;opacity:.92}.search{width:100%;padding:13px 15px;border:1px solid #d4e1e9;border-radius:14px;background:var(--tg-theme-secondary-bg-color,#fff);color:inherit;margin-bottom:12px}.chips{display:flex;gap:8px;overflow:auto;padding-bottom:8px}.chip{border:0;border-radius:999px;padding:9px 13px;background:#e5f4fd;color:#1679b6;white-space:nowrap}.chip.active{background:#168bd2;color:#fff}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}.card{background:var(--tg-theme-secondary-bg-color,#fff);border-radius:16px;padding:10px;box-shadow:0 4px 14px rgba(30,90,120,.08);display:flex;flex-direction:column}.photo{aspect-ratio:1/1;object-fit:contain;width:100%;border-radius:12px;background:#fff}.title{font-size:14px;line-height:1.25;margin:8px 0;min-height:35px}.price{font-weight:750;margin-top:auto}.row{display:flex;gap:7px;margin-top:9px}.add{flex:1;border:0;border-radius:11px;padding:10px;background:#168bd2;color:#fff;font-weight:700}.details{border:0;border-radius:11px;padding:10px;background:#e9f5fc;color:#1679b6}.bar{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:var(--tg-theme-bg-color,#fff);border-top:1px solid #dbe7ee}.cartbtn{display:block;width:min(736px,100%);margin:auto;border:0;border-radius:14px;padding:14px;background:#168bd2;color:#fff;font-weight:750}.empty{text-align:center;padding:40px 10px;color:#70808c}.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:flex-end;z-index:5}.sheet{width:100%;max-height:88vh;overflow:auto;background:var(--tg-theme-bg-color,#fff);border-radius:22px 22px 0 0;padding:18px}.close{float:right;border:0;background:transparent;font-size:24px}.sheet img{width:100%;max-height:280px;object-fit:contain;background:#fff;border-radius:14px}.qty{display:flex;align-items:center;gap:10px}.qty button{border:0;border-radius:10px;width:36px;height:36px;background:#e5f4fd}.checkout input,.checkout textarea{width:100%;margin:5px 0 9px;padding:12px;border:1px solid #ccdce6;border-radius:12px;background:var(--tg-theme-secondary-bg-color,#fff);color:inherit}.checkout textarea{min-height:70px}.submit{width:100%;border:0;border-radius:13px;padding:13px;background:#168bd2;color:#fff;font-weight:750}.muted{color:#71808c;font-size:13px}.loader{text-align:center;padding:50px}
+</style>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+const tg=window.Telegram?.WebApp; tg?.ready(); tg?.expand();
+const state={products:[],filtered:[],category:'Усі',cart:{},selected:null};
+const app=document.getElementById('app');
+const money=n=>`${Math.round(Number(n)||0)} грн`;
+const escapeHtml=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+function total(){return Object.values(state.cart).reduce((s,x)=>s+x.product.price*x.qty,0)}
+function count(){return Object.values(state.cart).reduce((s,x)=>s+x.qty,0)}
+function render(){
+ const cats=['Усі',...new Set(state.products.map(p=>p.category).filter(Boolean))].slice(0,18);
+ app.innerHTML=`<div class="shell"><section class="hero"><h1>🍬 OKVEJ</h1><p>Солодощі з доставкою по Україні</p></section><input id="search" class="search" placeholder="🔍 Пошук товару"/><div class="chips">${cats.map(c=>`<button class="chip ${c===state.category?'active':''}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')}</div><div class="grid">${state.filtered.map(card).join('')||'<div class="empty">Товарів не знайдено</div>'}</div></div><div class="bar"><button id="cartOpen" class="cartbtn">🛒 Кошик · ${count()} товарів · ${money(total())}</button></div>`;
+ document.querySelectorAll('[data-cat]').forEach(b=>b.addEventListener('click',()=>{state.category=b.dataset.cat;applyFilter()}));
+ document.querySelectorAll('[data-add]').forEach(b=>b.addEventListener('click',()=>add(b.dataset.add)));
+ document.querySelectorAll('[data-details]').forEach(b=>b.addEventListener('click',()=>details(b.dataset.details)));
+ document.getElementById('search').addEventListener('input',e=>applyFilter(e.target.value));
+ document.getElementById('cartOpen').addEventListener('click',openCart);
+}
+function card(p){return `<article class="card"><img class="photo" src="${escapeHtml(p.image||'')}" alt="${escapeHtml(p.title)}" onerror="this.style.visibility='hidden'"><div class="title">${escapeHtml(p.title)}</div><div class="price">${money(p.price)}</div><div class="row"><button class="details" data-details="${p.id}">ℹ️</button><button class="add" data-add="${p.id}">+ У кошик</button></div></article>`}
+function applyFilter(q=''){const text=q.trim().toLowerCase();state.filtered=state.products.filter(p=>(state.category==='Усі'||p.category===state.category)&&(!text||p.title.toLowerCase().includes(text)));render()}
+function add(id){const p=state.products.find(x=>x.id===id);if(!p)return;state.cart[id]??={product:p,qty:0};state.cart[id].qty++;tg?.HapticFeedback?.impactOccurred('light');render()}
+function details(id){const p=state.products.find(x=>x.id===id);if(!p)return;const modal=document.createElement('div');modal.className='modal';modal.innerHTML=`<div class="sheet"><button class="close">×</button><img src="${escapeHtml(p.image||'')}" alt=""><h2>${escapeHtml(p.title)}</h2><p class="price">${money(p.price)}</p><p>${escapeHtml(p.description||'Опис товару уточнюється.')}</p><button class="submit">🛒 Додати у кошик</button></div>`;document.body.appendChild(modal);modal.querySelector('.close').onclick=()=>modal.remove();modal.querySelector('.submit').onclick=()=>{add(id);modal.remove()}}
+function openCart(){const modal=document.createElement('div');modal.className='modal';const items=Object.values(state.cart);modal.innerHTML=`<div class="sheet"><button class="close">×</button><h2>🛒 Кошик</h2>${items.length?items.map(x=>`<div style="display:flex;gap:10px;align-items:center;border-bottom:1px solid #dbe7ee;padding:10px 0"><div style="flex:1"><b>${escapeHtml(x.product.title)}</b><div class="muted">${money(x.product.price)}</div></div><div class="qty"><button data-minus="${x.product.id}">−</button><b>${x.qty}</b><button data-plus="${x.product.id}">+</button></div></div>`).join('')+'<h3>Разом: '+money(total())+'</h3><div class="checkout"><input id="name" placeholder="Ім’я"><input id="phone" placeholder="Телефон"><input id="city" placeholder="Місто"><input id="branch" placeholder="Відділення Нової пошти"><textarea id="comment" placeholder="Коментар"></textarea><button id="order" class="submit">Оформити замовлення</button></div>':'<div class="empty">Кошик порожній</div>'}</div>`;document.body.appendChild(modal);modal.querySelector('.close').onclick=()=>modal.remove();modal.querySelectorAll('[data-plus]').forEach(b=>b.onclick=()=>{state.cart[b.dataset.plus].qty++;modal.remove();openCart();render()});modal.querySelectorAll('[data-minus]').forEach(b=>b.onclick=()=>{const x=state.cart[b.dataset.minus];x.qty--;if(x.qty<=0)delete state.cart[b.dataset.minus];modal.remove();openCart();render()});modal.querySelector('#order')?.addEventListener('click',()=>submitOrder(modal))}
+async function submitOrder(modal){const body={initData:tg?.initData||'',customer:{name:document.querySelector('#name').value.trim(),phone:document.querySelector('#phone').value.trim(),city:document.querySelector('#city').value.trim(),branch:document.querySelector('#branch').value.trim(),comment:document.querySelector('#comment').value.trim()},items:Object.values(state.cart).map(x=>({id:x.product.id,title:x.product.title,price:x.product.price,qty:x.qty,article:x.product.article}))};if(!body.customer.name||!body.customer.phone){tg?.showAlert?.('Вкажіть ім’я та телефон');return}const r=await fetch('/api/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(r.ok){state.cart={};modal.remove();render();tg?.showAlert?.('✅ Замовлення передано менеджеру!')}else{tg?.showAlert?.('Не вдалося оформити замовлення')}}
+app.innerHTML='<div class="loader">Завантаження каталогу…</div>';fetch('/api/products').then(r=>r.json()).then(d=>{state.products=d.products||[];state.filtered=state.products;render()}).catch(()=>app.innerHTML='<div class="empty">Не вдалося завантажити каталог</div>');
+</script>
+"""
+
+
+def mini_product(product):
+    description = clean_product_description(localize(product.get("short_description") or product.get("description") or ""))
+    return {
+        "id": product_key(product),
+        "article": product_article(product),
+        "title": clean_product_title(localize(product.get("title"))),
+        "price": price_number(product),
+        "image": get_image_url(product) or "",
+        "category": category_name(product),
+        "description": description[:700],
+        "link": product_link(product),
+    }
+
+
+async def miniapp_page(request):
+    return web.Response(text=MINI_APP_HTML, content_type="text/html", charset="utf-8")
+
+
+async def miniapp_products(request):
+    try:
+        products = await get_in_stock_products()
+        payload = [mini_product(p) for p in products]
+        payload = [p for p in payload if p["title"] and p["price"] >= 0]
+        return web.json_response({"products": payload}, dumps=lambda x: json.dumps(x, ensure_ascii=False))
+    except Exception as exc:
+        logging.exception("Mini App products error")
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def miniapp_order(request):
+    try:
+        data = await request.json()
+        customer = data.get("customer") or {}
+        items = data.get("items") or []
+        if not customer.get("name") or not customer.get("phone") or not items:
+            return web.json_response({"ok": False, "error": "missing fields"}, status=400)
+        lines = ["🛍 <b>Нове замовлення з Mini App</b>", "", f"👤 {html.escape(str(customer.get('name')))}", f"📞 {html.escape(str(customer.get('phone')))}"]
+        if customer.get("city"): lines.append(f"🏙 {html.escape(str(customer.get('city')))}")
+        if customer.get("branch"): lines.append(f"📦 НП: {html.escape(str(customer.get('branch')))}")
+        lines += ["", "<b>Товари:</b>"]
+        total = 0.0
+        for item in items[:50]:
+            qty = max(1, int(item.get("qty") or 1)); price = float(item.get("price") or 0); total += qty * price
+            lines.append(f"• {html.escape(str(item.get('title') or 'Товар'))} × {qty} — {qty*price:.0f} грн")
+        lines += ["", f"💰 <b>Разом: {total:.0f} грн</b>"]
+        if customer.get("comment"): lines += ["", f"💬 {html.escape(str(customer.get('comment')))}"]
+        target = MANAGER_CHAT_ID or ADMIN_USER_ID
+        if not target:
+            return web.json_response({"ok": False, "error": "manager not configured"}, status=503)
+        await bot.send_message(target, "\n".join(lines), parse_mode="HTML")
+        track_event("miniapp_order")
+        return web.json_response({"ok": True})
+    except Exception as exc:
+        logging.exception("Mini App order error")
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
+async def health(request):
+    return web.json_response({"ok": True, "version": BOT_VERSION})
+
+
+async def start_web_server():
+    app = web.Application(client_max_size=2 * 1024 * 1024)
+    app.router.add_get("/", miniapp_page)
+    app.router.add_get("/miniapp", miniapp_page)
+    app.router.add_get("/api/products", miniapp_products)
+    app.router.add_post("/api/order", miniapp_order)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+    logging.info("Mini App web server started on port %s", PORT)
+    return runner
+
+
+@dp.message(F.text == "🛍 Відкрити магазин")
+async def open_mini_app_fallback(message: Message):
+    if not MINI_APP_URL:
+        await message.answer("⚙️ Mini App майже готовий. Додайте змінну MINI_APP_URL у Railway.")
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🛍 Відкрити магазин", web_app=WebAppInfo(url=MINI_APP_URL))
+    ]])
+    await message.answer("Відкрийте магазин OKVEJ 👇", reply_markup=keyboard)
+
 async def main():
     logging.info("Starting OKVEJ bot v%s (%s)", BOT_VERSION, BOT_BUILD)
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    runner = await start_web_server()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
