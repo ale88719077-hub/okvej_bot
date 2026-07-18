@@ -3188,7 +3188,20 @@ function bind(){
  document.querySelectorAll('[data-details]').forEach(b=>b.onclick=()=>details(b.dataset.details));
  document.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>add(b.dataset.add));
  document.querySelectorAll('[data-fav]').forEach(b=>b.onclick=()=>toggleFavorite(b.dataset.fav));
- document.querySelector('#search')?.addEventListener('input',e=>{state.query=e.target.value.trim().toLowerCase();render()});
+ let searchTimer=null;
+document.querySelector('#search')?.addEventListener('input',e=>{
+ const value=e.target.value;
+ const caret=e.target.selectionStart??value.length;
+ state.query=value.toLowerCase();
+ clearTimeout(searchTimer);
+ searchTimer=setTimeout(()=>{
+  render();
+  requestAnimationFrame(()=>{
+   const input=document.querySelector('#search');
+   if(input){input.focus();const pos=Math.min(caret,input.value.length);input.setSelectionRange(pos,pos)}
+  });
+ },300);
+});
  document.querySelector('#categoryOpen')?.addEventListener('click',openCategories);
  document.querySelector('#reset')?.addEventListener('click',()=>{state.category='Усі';render()});
 }
