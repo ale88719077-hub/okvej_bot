@@ -27,8 +27,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "18.6"
-BOT_BUILD = "2026-07-21-single-file-horoshop-order-notifications"
+BOT_VERSION = "18.7"
+BOT_BUILD = "2026-07-21-orders-owner-manager-requirements-fix"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -3281,16 +3281,13 @@ async def open_mini_app_fallback(message: Message):
     await message.answer("Відкрийте магазин OKVEJ 👇", reply_markup=keyboard)
 
 
-
 # =============================================================
-# УВЕДОМЛЕНИЯ О НОВЫХ ЗАКАЗАХ ХОРОШОП — ВСТРОЕНО В ОДИН bot.py
-# Получатели автоматически берутся из ADMIN_USER_ID и MANAGER_CHAT_ID.
-# Дополнительно можно указать ORDER_NOTIFY_CHAT_IDS через запятую.
+# УВЕДОМЛЕНИЯ О НОВЫХ ЗАКАЗАХ ХОРОШОП
+# Получатели: ADMIN_USER_ID и MANAGER_CHAT_ID.
+# ORDER_NOTIFY_CHAT_IDS можно использовать дополнительно, но он не обязателен.
 # =============================================================
 
-ORDER_NOTIFY_STATE_PATH = Path(
-    os.getenv("ORDER_STATE_FILE", "/data/order_notifier_state.json")
-)
+ORDER_NOTIFY_STATE_PATH = Path(os.getenv("ORDER_STATE_FILE", "/data/order_notifier_state.json"))
 if not ORDER_NOTIFY_STATE_PATH.parent.exists():
     ORDER_NOTIFY_STATE_PATH = Path("order_notifier_state.json")
 
@@ -3302,8 +3299,9 @@ HOROSHOP_ORDERS_ADMIN_URL = os.getenv(
 
 
 def _notify_chat_ids():
+    values = []
     raw = os.getenv("ORDER_NOTIFY_CHAT_IDS", "")
-    values = [x.strip() for x in raw.split(",") if x.strip()]
+    values.extend(item.strip() for item in raw.split(",") if item.strip())
     values.extend([ADMIN_USER_ID, MANAGER_CHAT_ID])
     result = []
     for value in values:
@@ -3326,11 +3324,8 @@ def _order_value(obj, *keys, default=""):
 def _order_text(value):
     if isinstance(value, dict):
         return str(
-            value.get("ua")
-            or value.get("uk")
-            or value.get("ru")
-            or value.get("en")
-            or next(iter(value.values()), "")
+            value.get("ua") or value.get("uk") or value.get("ru")
+            or value.get("en") or next(iter(value.values()), "")
         )
     return str(value or "")
 
@@ -3363,7 +3358,9 @@ def _load_order_state():
     try:
         if ORDER_NOTIFY_STATE_PATH.exists():
             data = json.loads(ORDER_NOTIFY_STATE_PATH.read_text("utf-8"))
-            return bool(data.get("initialized")), {str(x) for x in data.get("seen_order_ids", [])}
+            return bool(data.get("initialized")), {
+                str(x) for x in data.get("seen_order_ids", [])
+            }
     except Exception:
         logging.exception("Cannot read order notification state")
     return False, set()
@@ -3388,7 +3385,9 @@ async def _horoshop_api_post(endpoint, payload):
     url = f"https://{domain}/api/{endpoint.strip('/')}/"
     timeout = aiohttp.ClientTimeout(total=35)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as response:
+        async with session.post(
+            url, json=payload, headers={"Content-Type": "application/json"}
+        ) as response:
             body = await response.text()
             if response.status >= 400:
                 raise RuntimeError(f"Horoshop HTTP {response.status}: {body[:400]}")
@@ -3445,7 +3444,10 @@ def _format_order_notification(order):
         or _order_text(_order_value(customer, "phone", "telephone", default=""))
         or _order_text(_order_value(order, "phone", "telephone", default=""))
     )
-    email = _order_text(_order_value(customer, "email", default="")) or _order_text(_order_value(order, "email", default=""))
+    email = (
+        _order_text(_order_value(customer, "email", default=""))
+        or _order_text(_order_value(order, "email", default=""))
+    )
     delivery = _order_text(_order_value(order, "delivery", "delivery_type", "shipping", default=""))
     payment = _order_text(_order_value(order, "payment", "payment_type", default=""))
     city = _order_text(_order_value(order, "city", "delivery_city", default=""))
@@ -3530,7 +3532,9 @@ async def order_notification_loop():
             orders = sorted(orders, key=lambda item: _order_id(item))
 
             if not initialized:
-                seen_ids.update(order_id for order in orders if (order_id := _order_id(order)))
+                seen_ids.update(
+                    order_id for order in orders if (order_id := _order_id(order))
+                )
                 initialized = True
                 _save_order_state(initialized, seen_ids)
                 logging.info("Order notifier initialized with %s existing orders", len(orders))
@@ -3553,7 +3557,6 @@ async def order_notification_loop():
             logging.exception("Order notifier check failed")
 
         await asyncio.sleep(ORDER_POLL_SECONDS)
-
 
 async def main():
     logging.info("Starting OKVEJ bot v%s (%s)", BOT_VERSION, BOT_BUILD)
