@@ -26,9 +26,10 @@ from html.parser import HTMLParser
 from aiohttp import web
 
 from horoshop_api import HoroshopAPI
+from order_notifier import start_order_notifier
 
-BOT_VERSION = "18.3"
-BOT_BUILD = "2026-07-18-menu-order-site-top-store-bottom"
+BOT_VERSION = "18.4"
+BOT_BUILD = "2026-07-21-horoshop-order-notifications-owner-manager"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -3284,9 +3285,12 @@ async def main():
     logging.info("Starting OKVEJ bot v%s (%s)", BOT_VERSION, BOT_BUILD)
     await bot.delete_webhook(drop_pending_updates=True)
     runner = await start_web_server()
+    order_notifier_task = await start_order_notifier(bot)
     try:
         await dp.start_polling(bot)
     finally:
+        order_notifier_task.cancel()
+        await asyncio.gather(order_notifier_task, return_exceptions=True)
         await runner.cleanup()
 
 

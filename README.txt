@@ -1,17 +1,19 @@
-ОБНОВЛЕНИЕ КЛАВИАТУРЫ OKVEJ
+OKVEJ bot v18.4 — уведомления о новых заказах владельцу и менеджеру
 
-1. Положите apply_hide_menu.py рядом с текущим bot.py.
-2. Откройте Терминал в этой папке.
-3. Выполните:
+Замените bot.py и добавьте order_notifier.py в проект Railway.
 
-   python3 apply_hide_menu.py bot.py
+Railway Variables:
+ORDER_NOTIFY_CHAT_IDS=ВАШ_CHAT_ID,CHAT_ID_МЕНЕДЖЕРА
+ORDER_POLL_SECONDS=45
+ORDER_STATE_FILE=/data/order_notifier_state.json
+HOROSHOP_ORDERS_ENDPOINT=orders/export
+HOROSHOP_ORDERS_ADMIN_URL=https://okvej.com.ua/admin/orders/
 
-4. Загрузите обновлённый bot.py в Railway и нажмите Redeploy.
+Уже существующие переменные должны остаться:
+TELEGRAM_BOT_TOKEN
+HOROSHOP_DOMAIN
+HOROSHOP_LOGIN
+HOROSHOP_PASSWORD
 
-Что изменится:
-- /hide скрывает клавиатуру.
-- Кнопка «❌ Сховати меню» скрывает клавиатуру.
-- /menu возвращает клавиатуру.
-- /commands показывает обновлённый список.
-- Публикация меню в канал перенесена с /menu на /channelmenu.
-- Автоматически создаётся резервная копия bot.py.backup.
+Каждый получатель должен открыть @okvej_shop_bot, нажать Start и отправить /myid.
+При первом запуске старые заказы не отправляются; бот начинает уведомлять только о новых.
