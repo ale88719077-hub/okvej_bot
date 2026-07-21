@@ -1,42 +1,66 @@
-OKVEJ BOT v18.8 — новые заказы через Zapier webhook
+OKVEJ — Хорошоп → Gmail → собственный Telegram-бот
+===================================================
 
-ПОЧЕМУ ТАК:
-Метод /api/orders/export/ в вашем магазине отвечает UNDEFINED_FUNCTION.
-Поэтому стабильный вариант — официальная интеграция Хорошоп с Zapier.
+Это бесплатная схема без Zapier.
 
-1. Загрузите в Railway:
-   - bot.py
-   - horoshop_api.py
-   - requirements.txt
+ВАЖНО СНАЧАЛА
+-------------
+В Railway переменная HOROSHOP_ORDER_WEBHOOK_SECRET уже должна содержать непустое
+значение. После добавления/изменения переменной обязательно нажмите Redeploy.
 
-2. В Railway Variables добавьте:
-   HOROSHOP_ORDER_WEBHOOK_SECRET=придумайте_длинный_секрет
+Проверка:
+https://okvejbot-production.up.railway.app/api/horoshop-order/health
 
-Например:
-   HOROSHOP_ORDER_WEBHOOK_SECRET=OKVEJ_2026_orders_8f72Kp91
+Ожидаемый ответ:
+{"ok":true,"configured":true,"recipients":2,"version":"18.8"}
 
-3. Получатели берутся автоматически из:
-   ADMIN_USER_ID
-   MANAGER_CHAT_ID
+Если configured=false — новый деплой ещё не получил переменную.
 
-4. После Redeploy проверьте адрес:
-   https://okvejbot-production.up.railway.app/api/horoshop-order/health
+ШАГ 1. Gmail
+------------
+1. В Gmail создайте ярлык: OKVEJ_NEW_ORDER
+2. Создайте фильтр:
+   Содержит слова / тема: Оформлен новый заказ
+3. Включите действие: применить ярлык OKVEJ_NEW_ORDER.
 
-Должен появиться JSON:
-   {"ok":true,"configured":true,"recipients":2,"version":"18.8"}
+Официальная инструкция Хорошоп также использует письма о новых заказах и Gmail-фильтр.
 
-5. В Хорошоп откройте Настройки → Zapier и выберите Zap для нового заказа.
-В Zapier добавьте действие Webhooks by Zapier → POST.
+ШАГ 2. Google Apps Script
+-------------------------
+1. Откройте script.google.com
+2. Создайте новый проект.
+3. Удалите стандартный код и вставьте содержимое Code.gs.
+4. Откройте Project Settings → Script Properties.
+5. Добавьте:
+   WEBHOOK_URL=https://okvejbot-production.up.railway.app/api/horoshop-order
+   WEBHOOK_SECRET=то же значение, что HOROSHOP_ORDER_WEBHOOK_SECRET в Railway
+6. Сохраните.
 
-URL:
-   https://okvejbot-production.up.railway.app/api/horoshop-order?secret=ВАШ_СЕКРЕТ
+ШАГ 3. Тест
+-----------
+1. В редакторе выберите функцию testWebhook.
+2. Нажмите Run.
+3. Разрешите доступ к Gmail и внешним запросам.
+4. В Telegram должно прийти тестовое уведомление владельцу и менеджеру.
 
-Payload Type: json
-Data: передайте все поля заказа из шага Хорошоп.
+ШАГ 4. Автоматическая проверка
+------------------------------
+1. Откройте Triggers (значок часов).
+2. Add Trigger.
+3. Function: checkHoroshopOrders
+4. Event source: Time-driven
+5. Type: Minutes timer
+6. Every 5 minutes
 
-6. Сделайте тест в Zapier. Сообщение должно прийти владельцу и менеджеру.
+После этого новые письма Хорошоп будут автоматически пересылаться в ваш бот.
+Обработанные письма получают ярлык OKVEJ_ORDER_SENT и повторно не отправляются.
 
-ВАЖНО:
-- order_notifier.py больше не нужен — удалите его.
-- ORDER_NOTIFY_CHAT_IDS не обязателен.
-- Старый цикл запросов orders/export удалён, поэтому ошибка UNDEFINED_FUNCTION исчезнет.
+СТАРЫЕ ПЕРЕМЕННЫЕ
+-----------------
+Эти переменные больше не нужны для схемы webhook/email:
+ORDER_POLL_SECONDS
+ORDER_STATE_FILE
+HOROSHOP_ORDERS_ENDPOINT
+HOROSHOP_ORDERS_ADMIN_URL
+
+ORDER_NOTIFY_CHAT_IDS можно удалить, если ADMIN_USER_ID и MANAGER_CHAT_ID заполнены.
