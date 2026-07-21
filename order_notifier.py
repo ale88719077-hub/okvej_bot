@@ -148,18 +148,34 @@ class OrderNotifier:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
         self.client = HoroshopOrdersClient()
-        raw_chat_ids = os.getenv(
-            "ORDER_NOTIFY_CHAT_IDS",
-            os.getenv("ORDER_NOTIFY_CHAT_ID", ""),
-        )
-        self.chat_ids = [
-            chat_id.strip()
-            for chat_id in raw_chat_ids.split(",")
-            if chat_id.strip()
+        # Приоритет: специальный список получателей. Если он не задан,
+        # автоматически используем уже существующие переменные владельца
+        # и менеджера из основного бота.
+        configured_ids = os.getenv("ORDER_NOTIFY_CHAT_IDS", "").strip()
+        fallback_ids = [
+            os.getenv("ORDER_NOTIFY_CHAT_ID", "").strip(),
+            os.getenv("ADMIN_USER_ID", "").strip(),
+            os.getenv("MANAGER_CHAT_ID", "").strip(),
         ]
-        if not self.chat_ids:
-            raise RuntimeError(
-                "Set ORDER_NOTIFY_CHAT_IDS, for example: 123456789,987654321"
+
+        raw_ids = []
+        if configured_ids:
+            raw_ids.extend(configured_ids.split(","))
+        else:
+            raw_ids.extend(fallback_ids)
+
+        # Убираем пустые значения и повторы, сохраняя порядок.
+        self.chat_ids = list(dict.fromkeys(
+            chat_id.strip()
+            for chat_id in raw_ids
+            if chat_id and chat_id.strip() and chat_id.strip() != "0"
+        ))
+
+        self.enabled = bool(self.chat_ids)
+        if not self.enabled:
+            log.warning(
+                "Order notifications disabled: set ORDER_NOTIFY_CHAT_IDS "
+                "or ADMIN_USER_ID / MANAGER_CHAT_ID"
             )
         self.poll_seconds = max(
             20,
@@ -338,6 +354,8 @@ class OrderNotifier:
             )
 
     async def check_once(self) -> None:
+        if not self.enabled:
+            return
         orders = await self.client.get_recent_orders()
         orders = sorted(
             orders,
@@ -371,6 +389,11 @@ class OrderNotifier:
             self._save_state()
 
     async def run_forever(self) -> None:
+        if not self.enabled:
+            log.warning("Order notifier task is idle because no recipients are configured")
+            while True:
+                await asyncio.sleep(3600)
+
         log.info(
             "Order notifier started: chats=%s interval=%ss",
             ",".join(self.chat_ids),

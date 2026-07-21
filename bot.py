@@ -26,10 +26,9 @@ from html.parser import HTMLParser
 from aiohttp import web
 
 from horoshop_api import HoroshopAPI
-from order_notifier import start_order_notifier
 
-BOT_VERSION = "18.4"
-BOT_BUILD = "2026-07-21-horoshop-order-notifications-owner-manager"
+BOT_VERSION = "18.6"
+BOT_BUILD = "2026-07-21-single-file-horoshop-order-notifications"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -3281,11 +3280,288 @@ async def open_mini_app_fallback(message: Message):
     ]])
     await message.answer("Відкрийте магазин OKVEJ 👇", reply_markup=keyboard)
 
+
+
+# =============================================================
+# УВЕДОМЛЕНИЯ О НОВЫХ ЗАКАЗАХ ХОРОШОП — ВСТРОЕНО В ОДИН bot.py
+# Получатели автоматически берутся из ADMIN_USER_ID и MANAGER_CHAT_ID.
+# Дополнительно можно указать ORDER_NOTIFY_CHAT_IDS через запятую.
+# =============================================================
+
+ORDER_NOTIFY_STATE_PATH = Path(
+    os.getenv("ORDER_STATE_FILE", "/data/order_notifier_state.json")
+)
+if not ORDER_NOTIFY_STATE_PATH.parent.exists():
+    ORDER_NOTIFY_STATE_PATH = Path("order_notifier_state.json")
+
+ORDER_POLL_SECONDS = max(20, int(os.getenv("ORDER_POLL_SECONDS", "45")))
+HOROSHOP_ORDERS_ENDPOINT = os.getenv("HOROSHOP_ORDERS_ENDPOINT", "orders/export").strip("/")
+HOROSHOP_ORDERS_ADMIN_URL = os.getenv(
+    "HOROSHOP_ORDERS_ADMIN_URL", "https://okvej.com.ua/admin/orders/"
+)
+
+
+def _notify_chat_ids():
+    raw = os.getenv("ORDER_NOTIFY_CHAT_IDS", "")
+    values = [x.strip() for x in raw.split(",") if x.strip()]
+    values.extend([ADMIN_USER_ID, MANAGER_CHAT_ID])
+    result = []
+    for value in values:
+        value = str(value or "").strip()
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
+def _order_value(obj, *keys, default=""):
+    if not isinstance(obj, dict):
+        return default
+    for key in keys:
+        value = obj.get(key)
+        if value not in (None, "", [], {}):
+            return value
+    return default
+
+
+def _order_text(value):
+    if isinstance(value, dict):
+        return str(
+            value.get("ua")
+            or value.get("uk")
+            or value.get("ru")
+            or value.get("en")
+            or next(iter(value.values()), "")
+        )
+    return str(value or "")
+
+
+def _order_money(value):
+    if isinstance(value, dict):
+        value = _order_value(value, "value", "amount", "price", default=0)
+    try:
+        number = float(str(value).replace(" ", "").replace(",", "."))
+        return f"{number:,.2f}".replace(",", " ").replace(".00", "")
+    except (TypeError, ValueError):
+        return str(value or "0")
+
+
+def _order_id(order):
+    return str(_order_value(
+        order, "id", "order_id", "orderId", "number", "order_number", default=""
+    )).strip()
+
+
+def _order_products(order):
+    for key in ("products", "items", "order_products", "cart"):
+        value = order.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _load_order_state():
+    try:
+        if ORDER_NOTIFY_STATE_PATH.exists():
+            data = json.loads(ORDER_NOTIFY_STATE_PATH.read_text("utf-8"))
+            return bool(data.get("initialized")), {str(x) for x in data.get("seen_order_ids", [])}
+    except Exception:
+        logging.exception("Cannot read order notification state")
+    return False, set()
+
+
+def _save_order_state(initialized, seen_ids):
+    try:
+        ORDER_NOTIFY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ORDER_NOTIFY_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "initialized": initialized,
+            "seen_order_ids": list(seen_ids)[-1000:],
+        }, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(ORDER_NOTIFY_STATE_PATH)
+    except Exception:
+        logging.exception("Cannot save order notification state")
+
+
+async def _horoshop_api_post(endpoint, payload):
+    domain = os.getenv("HOROSHOP_DOMAIN", "okvej.com.ua")
+    domain = domain.replace("https://", "").replace("http://", "").strip("/")
+    url = f"https://{domain}/api/{endpoint.strip('/')}/"
+    timeout = aiohttp.ClientTimeout(total=35)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as response:
+            body = await response.text()
+            if response.status >= 400:
+                raise RuntimeError(f"Horoshop HTTP {response.status}: {body[:400]}")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Horoshop returned invalid JSON: {body[:400]}") from exc
+
+
+async def _horoshop_recent_orders(limit=30):
+    login = os.getenv("HOROSHOP_LOGIN")
+    password = os.getenv("HOROSHOP_PASSWORD")
+    if not login or not password:
+        raise RuntimeError("HOROSHOP_LOGIN or HOROSHOP_PASSWORD is not set")
+
+    auth = await _horoshop_api_post("auth", {"login": login, "password": password})
+    if auth.get("status") != "OK":
+        raise RuntimeError(f"Horoshop auth error: {auth}")
+    token = str(auth.get("response", {}).get("token") or "")
+    if not token:
+        raise RuntimeError("Horoshop auth token is empty")
+
+    data = await _horoshop_api_post(HOROSHOP_ORDERS_ENDPOINT, {
+        "token": token,
+        "offset": 0,
+        "limit": limit,
+    })
+    if data.get("status") != "OK":
+        raise RuntimeError(f"Horoshop orders error: {data}")
+
+    response = data.get("response", {})
+    if isinstance(response, list):
+        return [x for x in response if isinstance(x, dict)]
+    if isinstance(response, dict):
+        for key in ("orders", "items", "data"):
+            value = response.get(key)
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+    return []
+
+
+def _format_order_notification(order):
+    order_number = _order_id(order) or "без номера"
+    customer = _order_value(order, "customer", "user", "client", default={})
+    recipient = _order_value(order, "recipient", "delivery_recipient", default={})
+
+    name = (
+        _order_text(_order_value(recipient, "name", "title", default=""))
+        or _order_text(_order_value(customer, "name", "title", "full_name", default=""))
+        or _order_text(_order_value(order, "name", "customer_name", default=""))
+    )
+    phone = (
+        _order_text(_order_value(recipient, "phone", default=""))
+        or _order_text(_order_value(customer, "phone", "telephone", default=""))
+        or _order_text(_order_value(order, "phone", "telephone", default=""))
+    )
+    email = _order_text(_order_value(customer, "email", default="")) or _order_text(_order_value(order, "email", default=""))
+    delivery = _order_text(_order_value(order, "delivery", "delivery_type", "shipping", default=""))
+    payment = _order_text(_order_value(order, "payment", "payment_type", default=""))
+    city = _order_text(_order_value(order, "city", "delivery_city", default=""))
+    address = _order_text(_order_value(order, "address", "delivery_address", "warehouse", default=""))
+    comment = _order_text(_order_value(order, "comment", "customer_comment", default=""))
+    total = _order_value(order, "total", "total_sum", "amount", "sum", "price", default=0)
+
+    lines = ["🔔 <b>НОВЕ ЗАМОВЛЕННЯ</b>", "", f"🧾 Номер: <b>#{html.escape(order_number)}</b>"]
+    if name:
+        lines.append(f"👤 Клієнт: <b>{html.escape(name)}</b>")
+    if phone:
+        lines.append(f"📞 Телефон: <code>{html.escape(phone)}</code>")
+    if email:
+        lines.append(f"✉️ Email: {html.escape(email)}")
+
+    products = _order_products(order)
+    if products:
+        lines.extend(["", "🛒 <b>Товари:</b>"])
+        for index, item in enumerate(products[:25], start=1):
+            title = _order_text(_order_value(item, "title", "name", "product_title", default="Товар"))
+            qty = _order_value(item, "quantity", "qty", "count", default=1)
+            price = _order_value(item, "price", "cost", "amount", default="")
+            row = f"{index}. {html.escape(title)} × {html.escape(str(qty))}"
+            if price not in ("", None):
+                row += f" — {_order_money(price)} грн"
+            lines.append(row)
+        if len(products) > 25:
+            lines.append(f"…ще {len(products) - 25} позицій")
+
+    lines.extend(["", f"💰 Сума: <b>{_order_money(total)} грн</b>"])
+    if delivery:
+        lines.append(f"🚚 Доставка: {html.escape(delivery)}")
+    if city:
+        lines.append(f"🏙 Місто: {html.escape(city)}")
+    if address:
+        lines.append(f"📍 Адреса/відділення: {html.escape(address)}")
+    if payment:
+        lines.append(f"💳 Оплата: {html.escape(payment)}")
+    if comment:
+        lines.extend(["", f"💬 Коментар: {html.escape(comment)}"])
+    return "\n".join(lines)
+
+
+async def _send_new_order(order, recipients):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📦 Відкрити замовлення", url=HOROSHOP_ORDERS_ADMIN_URL)
+    ]])
+    message = _format_order_notification(order)
+    delivered = 0
+    for chat_id in recipients:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+            delivered += 1
+        except Exception:
+            logging.exception("Cannot send order notification to chat %s", chat_id)
+    return delivered
+
+
+async def order_notification_loop():
+    recipients = _notify_chat_ids()
+    if not recipients:
+        logging.warning(
+            "Order notifications disabled: ADMIN_USER_ID and MANAGER_CHAT_ID are empty"
+        )
+        return
+
+    initialized, seen_ids = _load_order_state()
+    logging.info(
+        "Order notifier started: chats=%s interval=%ss",
+        ",".join(recipients), ORDER_POLL_SECONDS,
+    )
+
+    while True:
+        try:
+            orders = await _horoshop_recent_orders()
+            orders = sorted(orders, key=lambda item: _order_id(item))
+
+            if not initialized:
+                seen_ids.update(order_id for order in orders if (order_id := _order_id(order)))
+                initialized = True
+                _save_order_state(initialized, seen_ids)
+                logging.info("Order notifier initialized with %s existing orders", len(orders))
+            else:
+                changed = False
+                for order in orders:
+                    order_id = _order_id(order)
+                    if not order_id or order_id in seen_ids:
+                        continue
+                    delivered = await _send_new_order(order, recipients)
+                    if delivered:
+                        seen_ids.add(order_id)
+                        changed = True
+                        logging.info("New Horoshop order sent: %s", order_id)
+                if changed:
+                    _save_order_state(initialized, seen_ids)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Order notifier check failed")
+
+        await asyncio.sleep(ORDER_POLL_SECONDS)
+
+
 async def main():
     logging.info("Starting OKVEJ bot v%s (%s)", BOT_VERSION, BOT_BUILD)
     await bot.delete_webhook(drop_pending_updates=True)
     runner = await start_web_server()
-    order_notifier_task = await start_order_notifier(bot)
+    order_notifier_task = asyncio.create_task(
+        order_notification_loop(), name="okvej-order-notifier"
+    )
     try:
         await dp.start_polling(bot)
     finally:
