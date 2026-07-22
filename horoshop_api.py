@@ -76,3 +76,47 @@ class HoroshopAPI:
             raise RuntimeError(f"Horoshop catalog error: {data}")
 
         return data.get("response", {}).get("products", [])
+    async def get_orders(self, *, date_from=None, date_to=None, statuses=None, ids=None, limit=100, offset=0, additional_data=True):
+        token = await self.get_token()
+        payload = {
+            "token": token,
+            "offset": int(offset),
+            "limit": int(limit),
+            "additionalData": bool(additional_data),
+        }
+        if date_from:
+            payload["from"] = date_from
+        if date_to:
+            payload["to"] = date_to
+        if statuses is not None:
+            payload["status"] = statuses
+        if ids:
+            payload["ids"] = [int(x) for x in ids]
+
+        data = await self._post("orders/get", payload)
+        if data.get("status") == "EMPTY":
+            return []
+        if data.get("status") != "OK":
+            raise RuntimeError(f"Horoshop orders error: {data}")
+        return data.get("response", {}).get("orders", [])
+
+    async def update_orders(self, orders):
+        token = await self.get_token()
+        data = await self._post("orders/update", {
+            "token": token,
+            "orders": orders,
+        })
+        if data.get("status") not in ("OK", "WARNING"):
+            raise RuntimeError(f"Horoshop order update error: {data}")
+        return data
+
+    async def update_order(self, order_id, *, status=None, payed=None, tracking_code=None):
+        item = {"order_id": int(order_id)}
+        if status is not None:
+            item["status"] = int(status)
+        if payed is not None:
+            item["payed"] = 1 if bool(payed) else 0
+        if tracking_code:
+            item["tracking_code"] = str(tracking_code)
+        return await self.update_orders([item])
+

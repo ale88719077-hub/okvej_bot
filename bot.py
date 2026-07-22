@@ -8,7 +8,7 @@ import hashlib
 import html
 from collections import defaultdict
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse, unquote
 
 import aiohttp
@@ -27,8 +27,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "18.8"
-BOT_BUILD = "2026-07-21-horoshop-zapier-webhook-orders"
+BOT_VERSION = "18.9"
+BOT_BUILD = "2026-07-22-horoshop-direct-orders-get"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -3327,7 +3327,9 @@ def _order_value(obj, *keys, default=""):
 def _order_text(value):
     if isinstance(value, dict):
         return str(
-            value.get("ua")
+            value.get("title")
+            or value.get("name")
+            or value.get("ua")
             or value.get("uk")
             or value.get("ru")
             or value.get("en")
@@ -3403,16 +3405,16 @@ def _format_order_notification(order):
     name = (
         _order_text(_order_value(recipient, "name", "title", default=""))
         or _order_text(_order_value(customer, "name", "title", "full_name", default=""))
-        or _order_text(_order_value(order, "name", "customer_name", "client_name", default=""))
+        or _order_text(_order_value(order, "delivery_name", "name", "customer_name", "client_name", default=""))
     )
     phone = (
         _order_text(_order_value(recipient, "phone", default=""))
         or _order_text(_order_value(customer, "phone", "telephone", default=""))
-        or _order_text(_order_value(order, "phone", "telephone", "customer_phone", default=""))
+        or _order_text(_order_value(order, "delivery_phone", "phone", "telephone", "customer_phone", default=""))
     )
     email = (
         _order_text(_order_value(customer, "email", default=""))
-        or _order_text(_order_value(order, "email", "customer_email", default=""))
+        or _order_text(_order_value(order, "delivery_email", "email", "customer_email", default=""))
     )
     delivery = _order_text(_order_value(
         order, "delivery", "delivery_type", "shipping", "delivery_name", default=""
@@ -3465,6 +3467,12 @@ def _format_order_notification(order):
         lines.append(f"📍 Адреса/відділення: {html.escape(address)}")
     if payment:
         lines.append(f"💳 Оплата: {html.escape(payment)}")
+    payed = _order_value(order, "payed", default=None)
+    if payed is not None:
+        lines.append("✅ Статус оплати: <b>Оплачено</b>" if str(payed) == "1" else "⏳ Статус оплати: не оплачено")
+    created = _order_text(_order_value(order, "stat_created", "created_at", default=""))
+    if created:
+        lines.append(f"🕒 Створено: {html.escape(created)}")
     if comment:
         lines.extend(["", f"💬 Коментар: {html.escape(comment)}"])
     return "\n".join(lines)
@@ -3475,9 +3483,22 @@ async def _send_order_to_recipients(order):
     if not recipients:
         raise RuntimeError("ADMIN_USER_ID and MANAGER_CHAT_ID are empty")
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📦 Відкрити замовлення", url=HOROSHOP_ORDERS_ADMIN_URL)
-    ]])
+    order_id = _order_id(order)
+    rows = []
+    if order_id:
+        rows.extend([
+            [
+                InlineKeyboardButton(text="✅ В обробку", callback_data=f"hs_status:{order_id}:2"),
+                InlineKeyboardButton(text="🚚 Доставляється", callback_data=f"hs_status:{order_id}:6"),
+            ],
+            [
+                InlineKeyboardButton(text="✔️ Доставлено", callback_data=f"hs_status:{order_id}:3"),
+                InlineKeyboardButton(text="❌ Не доставлено", callback_data=f"hs_status:{order_id}:4"),
+            ],
+            [InlineKeyboardButton(text="💳 Позначити оплаченим", callback_data=f"hs_paid:{order_id}")],
+        ])
+    rows.append([InlineKeyboardButton(text="📦 Відкрити замовлення", url=HOROSHOP_ORDERS_ADMIN_URL)])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     message = _format_order_notification(order)
     delivered = 0
     for chat_id in recipients:
@@ -3549,6 +3570,129 @@ async def horoshop_order_webhook(request):
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
 
+
+# =============================================================
+# ПРЯМА ПЕРЕВІРКА НОВИХ ЗАМОВЛЕНЬ ЧЕРЕЗ ХОРОШОП API orders/get
+# =============================================================
+ORDER_API_POLL_SECONDS = max(20, int(os.getenv("ORDER_POLL_SECONDS", "45")))
+ORDER_API_STATE_PATH = Path(os.getenv("ORDER_STATE_FILE", "/data/order_api_state.json"))
+if not ORDER_API_STATE_PATH.parent.exists():
+    ORDER_API_STATE_PATH = Path("order_api_state.json")
+
+
+def _load_order_api_state():
+    try:
+        if ORDER_API_STATE_PATH.exists():
+            data = json.loads(ORDER_API_STATE_PATH.read_text("utf-8"))
+            return {
+                "initialized": bool(data.get("initialized", False)),
+                "seen": {str(x) for x in data.get("seen_order_ids", [])},
+            }
+    except Exception:
+        logging.exception("Cannot read Horoshop order API state")
+    return {"initialized": False, "seen": set()}
+
+
+def _save_order_api_state(state):
+    try:
+        ORDER_API_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ORDER_API_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "initialized": bool(state.get("initialized")),
+            "seen_order_ids": list(state.get("seen", set()))[-3000:],
+        }, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(ORDER_API_STATE_PATH)
+    except Exception:
+        logging.exception("Cannot save Horoshop order API state")
+
+
+async def check_horoshop_orders_once(state):
+    # Берём небольшой запас по времени, а дубли исключаем по order_id.
+    date_from = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    orders = await shop.get_orders(
+        date_from=date_from,
+        limit=100,
+        offset=0,
+        additional_data=True,
+    )
+    orders = sorted(
+        [order for order in orders if isinstance(order, dict)],
+        key=lambda x: (str(x.get("stat_created", "")), int(x.get("order_id", 0) or 0)),
+    )
+
+    current_ids = {str(order.get("order_id")) for order in orders if order.get("order_id") is not None}
+    if not state["initialized"]:
+        state["seen"].update(current_ids)
+        state["initialized"] = True
+        _save_order_api_state(state)
+        logging.info("Horoshop orders initialized with %s existing orders", len(current_ids))
+        return
+
+    changed = False
+    for order in orders:
+        order_id = str(order.get("order_id", "")).strip()
+        if not order_id or order_id in state["seen"]:
+            continue
+        delivered = await _send_order_to_recipients(order)
+        if delivered:
+            state["seen"].add(order_id)
+            changed = True
+            logging.info("New Horoshop order %s sent to %s chats", order_id, delivered)
+    if changed:
+        _save_order_api_state(state)
+
+
+async def horoshop_orders_polling_loop():
+    state = _load_order_api_state()
+    logging.info("Horoshop orders/get polling started: interval=%ss recipients=%s", ORDER_API_POLL_SECONDS, len(_notify_chat_ids()))
+    while True:
+        try:
+            await check_horoshop_orders_once(state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Horoshop orders/get polling failed")
+        await asyncio.sleep(ORDER_API_POLL_SECONDS)
+
+
+def _is_order_manager(user_id):
+    allowed = {str(x).strip() for x in (ADMIN_USER_ID, MANAGER_CHAT_ID) if str(x or "").strip()}
+    return str(user_id) in allowed
+
+
+@dp.callback_query(F.data.startswith("hs_status:"))
+async def horoshop_change_order_status(callback: CallbackQuery):
+    if not _is_order_manager(callback.from_user.id):
+        await callback.answer("Недостатньо прав", show_alert=True)
+        return
+    try:
+        _, order_id, status = callback.data.split(":", 2)
+        labels = {"2": "В обробці", "3": "Доставлено", "4": "Не доставлено", "6": "Доставляється"}
+        await shop.update_order(order_id, status=int(status))
+        await callback.answer(f"Статус: {labels.get(status, status)}")
+        if callback.message:
+            await callback.message.reply(f"✅ Замовлення #{order_id}: <b>{labels.get(status, status)}</b>", parse_mode="HTML")
+    except Exception as exc:
+        logging.exception("Cannot update Horoshop order status")
+        await callback.answer(f"Помилка: {str(exc)[:120]}", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("hs_paid:"))
+async def horoshop_mark_order_paid(callback: CallbackQuery):
+    if not _is_order_manager(callback.from_user.id):
+        await callback.answer("Недостатньо прав", show_alert=True)
+        return
+    try:
+        order_id = callback.data.split(":", 1)[1]
+        await shop.update_order(order_id, payed=True)
+        await callback.answer("Позначено як оплачено")
+        if callback.message:
+            await callback.message.reply(f"💳 Замовлення #{order_id}: <b>оплачено</b>", parse_mode="HTML")
+    except Exception as exc:
+        logging.exception("Cannot mark Horoshop order paid")
+        await callback.answer(f"Помилка: {str(exc)[:120]}", show_alert=True)
+
+
 async def horoshop_order_webhook_health(request):
     return web.json_response({
         "ok": True,
@@ -3565,9 +3709,15 @@ async def main():
         "Horoshop order webhook ready: configured=%s recipients=%s",
         bool(ORDER_WEBHOOK_SECRET), len(_notify_chat_ids()),
     )
+    order_polling_task = asyncio.create_task(
+        horoshop_orders_polling_loop(),
+        name="horoshop-orders-get-polling",
+    )
     try:
         await dp.start_polling(bot)
     finally:
+        order_polling_task.cancel()
+        await asyncio.gather(order_polling_task, return_exceptions=True)
         await runner.cleanup()
         await bot.session.close()
 
