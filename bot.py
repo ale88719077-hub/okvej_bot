@@ -6,6 +6,7 @@ import json
 import time
 import hashlib
 import html
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -19,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, WebAppInfo,
+    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, WebAppInfo, FSInputFile,
 )
 
 from html.parser import HTMLParser
@@ -27,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "19.0"
-BOT_BUILD = "2026-07-22-order-card-redesign"
+BOT_VERSION = "19.1"
+BOT_BUILD = "2026-07-22-auto-xlsx-price"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -148,8 +149,9 @@ main_menu = ReplyKeyboardMarkup(
         ],
         [
             KeyboardButton(text="🛒 Кошик"),
-            KeyboardButton(text="🚚 Доставка й оплата"),
+            KeyboardButton(text="📄 Прайс"),
         ],
+        [KeyboardButton(text="🚚 Доставка й оплата")],
         [
             KeyboardButton(text="💬 Менеджер"),
             KeyboardButton(text="📢 Канал OKVEJ"),
@@ -2121,6 +2123,141 @@ async def manual_post_publish(message: Message, state: FSMContext):
     except Exception as e:
         logging.exception("Manual product post error")
         await message.answer(f"❌ Ошибка публикации: {e}")
+
+
+
+def build_price_xlsx(products, output_path: str):
+    """Створює акуратний актуальний прайс OKVEJ у форматі Excel."""
+    import xlsxwriter
+
+    workbook = xlsxwriter.Workbook(output_path, {"constant_memory": True})
+    worksheet = workbook.add_worksheet("Прайс OKVEJ")
+
+    title_format = workbook.add_format({
+        "bold": True,
+        "font_size": 18,
+        "align": "center",
+        "valign": "vcenter",
+        "bg_color": "#D9F2FF",
+        "border": 1,
+    })
+    info_format = workbook.add_format({"font_size": 10, "font_color": "#555555"})
+    header_format = workbook.add_format({
+        "bold": True,
+        "font_color": "#FFFFFF",
+        "bg_color": "#168BD2",
+        "align": "center",
+        "valign": "vcenter",
+        "border": 1,
+    })
+    text_format = workbook.add_format({"border": 1, "valign": "top"})
+    center_format = workbook.add_format({"border": 1, "align": "center", "valign": "top"})
+    price_format = workbook.add_format({
+        "border": 1,
+        "num_format": '#,##0.00 "грн"',
+        "align": "right",
+        "valign": "top",
+    })
+    link_format = workbook.add_format({
+        "font_color": "#0563C1",
+        "underline": True,
+        "border": 1,
+        "align": "center",
+        "valign": "top",
+    })
+
+    worksheet.merge_range("A1:G1", "OKVEJ — актуальний прайс", title_format)
+    generated = datetime.now().strftime("%d.%m.%Y %H:%M")
+    worksheet.write("A2", f"Оновлено: {generated}", info_format)
+    worksheet.write("D2", f"Товарів у наявності: {len(products)}", info_format)
+
+    headers = ["№", "Категорія", "Назва товару", "Артикул", "Ціна", "Наявність", "Посилання"]
+    header_row = 3
+    for col, value in enumerate(headers):
+        worksheet.write(header_row, col, value, header_format)
+
+    for index, product in enumerate(products, start=1):
+        row = header_row + index
+        title = clean_product_title(localize(product.get("title")))
+        article = product_article(product)
+        category = category_name(product)
+        price = price_number(product)
+        link = product_link(product)
+
+        worksheet.write_number(row, 0, index, center_format)
+        worksheet.write(row, 1, category, text_format)
+        worksheet.write(row, 2, title, text_format)
+        worksheet.write(row, 3, article, center_format)
+        worksheet.write_number(row, 4, price, price_format)
+        worksheet.write(row, 5, "В наявності", center_format)
+        worksheet.write_url(row, 6, link, link_format, "Відкрити")
+
+    last_row = header_row + len(products)
+    worksheet.autofilter(header_row, 0, last_row, 6)
+    worksheet.freeze_panes(header_row + 1, 0)
+    worksheet.set_row(0, 30)
+    worksheet.set_row(header_row, 25)
+    worksheet.set_column("A:A", 6)
+    worksheet.set_column("B:B", 22)
+    worksheet.set_column("C:C", 48)
+    worksheet.set_column("D:D", 16)
+    worksheet.set_column("E:E", 15)
+    worksheet.set_column("F:F", 16)
+    worksheet.set_column("G:G", 14)
+    worksheet.set_landscape()
+    worksheet.fit_to_pages(1, 0)
+    worksheet.set_margins(0.25, 0.25, 0.5, 0.5)
+    workbook.close()
+
+
+async def send_current_price(message: Message):
+    loading = await message.answer("⏳ Формую актуальний прайс із Хорошопу...")
+    temp_path = None
+    try:
+        products = await get_in_stock_products(force_refresh=True)
+        products = sorted(
+            products,
+            key=lambda p: (category_sort_key(category_name(p)), clean_product_title(localize(p.get("title"))).lower()),
+        )
+        filename = f"OKVEJ_Price_{datetime.now().strftime('%d-%m-%Y')}.xlsx"
+        temp_dir = tempfile.mkdtemp(prefix="okvej_price_")
+        temp_path = str(Path(temp_dir) / filename)
+        await asyncio.to_thread(build_price_xlsx, products, temp_path)
+
+        await message.answer_document(
+            FSInputFile(temp_path, filename=filename),
+            caption=(
+                f"📄 <b>Актуальний прайс OKVEJ</b>\n"
+                f"✅ Товарів у наявності: <b>{len(products)}</b>\n"
+                f"🕒 Оновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            ),
+            parse_mode="HTML",
+        )
+        await loading.delete()
+    except Exception as error:
+        logging.exception("Price generation error")
+        await loading.edit_text(
+            "❌ Не вдалося сформувати прайс. Перевірте логи Railway і спробуйте ще раз."
+        )
+    finally:
+        if temp_path:
+            try:
+                path = Path(temp_path)
+                if path.exists():
+                    path.unlink()
+                path.parent.rmdir()
+            except Exception:
+                pass
+
+
+@dp.message(Command("price"))
+async def price_command(message: Message):
+    await send_current_price(message)
+
+
+@dp.message(F.text == "📄 Прайс")
+async def price_button(message: Message):
+    await send_current_price(message)
 
 
 @dp.message(Command("analytics"))
