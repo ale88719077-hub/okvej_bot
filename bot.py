@@ -29,7 +29,7 @@ from aiohttp import web
 from horoshop_api import HoroshopAPI
 
 BOT_VERSION = "19.2"
-BOT_BUILD = "2026-07-22-auto-xlsx-price"
+BOT_BUILD = "2026-07-22-price-brand-filter"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -2127,6 +2127,20 @@ async def manual_post_publish(message: Message, state: FSMContext):
 
 
 
+def product_brand(product) -> str:
+    """Повертає назву бренду з різних можливих форматів Horoshop API."""
+    for key in ("brand", "brand_name", "producer", "manufacturer", "vendor"):
+        value = product.get(key)
+        if isinstance(value, dict):
+            value = value.get("title") or value.get("name") or value.get("value")
+        elif isinstance(value, list) and value:
+            first = value[0]
+            value = (first.get("title") or first.get("name") or first.get("value")) if isinstance(first, dict) else first
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return "Без бренду"
+
+
 def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
     """Створює актуальний Excel-прайс OKVEJ. Для оптового прайса застосовує знижку."""
     import xlsxwriter
@@ -2180,7 +2194,7 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
     })
 
     title = f"OKVEJ — оптовий прайс зі знижкою {discount_percent:g}%" if is_discount else "OKVEJ — актуальний прайс"
-    end_col = 7 if is_discount else 6
+    end_col = 8 if is_discount else 7
     worksheet.merge_range(0, 0, 0, end_col, title, title_format)
     generated = datetime.now().strftime("%d.%m.%Y %H:%M")
     worksheet.write("A2", f"Оновлено: {generated}", info_format)
@@ -2188,7 +2202,7 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
     if is_discount:
         worksheet.write("G2", f"Знижка: {discount_percent:g}%", info_format)
 
-    headers = ["№", "Категорія", "Назва товару", "Артикул", "Ціна сайту"]
+    headers = ["№", "Бренд", "Категорія", "Назва товару", "Артикул", "Ціна сайту"]
     if is_discount:
         headers.append(f"Ціна -{discount_percent:g}%")
     headers.extend(["Наявність", "Посилання"])
@@ -2202,16 +2216,18 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
         row = header_row + index
         title = clean_product_title(localize(product.get("title")))
         article = product_article(product)
+        brand = product_brand(product)
         category = category_name(product)
         price = price_number(product)
         link = product_link(product)
 
         worksheet.write_number(row, 0, index, center_format)
-        worksheet.write(row, 1, category, text_format)
-        worksheet.write(row, 2, title, text_format)
-        worksheet.write(row, 3, article, center_format)
-        worksheet.write_number(row, 4, price, price_format)
-        next_col = 5
+        worksheet.write(row, 1, brand, text_format)
+        worksheet.write(row, 2, category, text_format)
+        worksheet.write(row, 3, title, text_format)
+        worksheet.write(row, 4, article, center_format)
+        worksheet.write_number(row, 5, price, price_format)
+        next_col = 6
         if is_discount:
             discounted_price = round(price * discount_factor, 2)
             worksheet.write_number(row, next_col, discounted_price, discount_price_format)
@@ -2225,16 +2241,17 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
     worksheet.set_row(0, 30)
     worksheet.set_row(header_row, 25)
     worksheet.set_column("A:A", 6)
-    worksheet.set_column("B:B", 22)
-    worksheet.set_column("C:C", 48)
-    worksheet.set_column("D:D", 16)
-    worksheet.set_column("E:F", 16)
+    worksheet.set_column("B:B", 20)
+    worksheet.set_column("C:C", 22)
+    worksheet.set_column("D:D", 48)
+    worksheet.set_column("E:E", 16)
+    worksheet.set_column("F:G", 16)
     if is_discount:
+        worksheet.set_column("H:H", 16)
+        worksheet.set_column("I:I", 14)
+    else:
         worksheet.set_column("G:G", 16)
         worksheet.set_column("H:H", 14)
-    else:
-        worksheet.set_column("F:F", 16)
-        worksheet.set_column("G:G", 14)
     worksheet.set_landscape()
     worksheet.fit_to_pages(1, 0)
     worksheet.set_margins(0.25, 0.25, 0.5, 0.5)
@@ -2250,7 +2267,7 @@ async def send_current_price(message: Message, discount_percent: float = 0):
         products = await get_in_stock_products(force_refresh=True)
         products = sorted(
             products,
-            key=lambda p: (category_sort_key(category_name(p)), clean_product_title(localize(p.get("title"))).lower()),
+            key=lambda p: (product_brand(p).lower(), category_sort_key(category_name(p)), clean_product_title(localize(p.get("title"))).lower()),
         )
         date_part = datetime.now().strftime('%d-%m-%Y')
         filename = f"OKVEJ_Wholesale_Price_-5pct_{date_part}.xlsx" if is_discount else f"OKVEJ_Price_{date_part}.xlsx"

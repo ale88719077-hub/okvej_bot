@@ -68,7 +68,8 @@ class HoroshopAPI:
                 "short_description",
                 "weight",
                 "packing",
-                "unit"
+                "unit",
+                "brand"
             ]
         })
 
