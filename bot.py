@@ -27,8 +27,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "18.9"
-BOT_BUILD = "2026-07-22-horoshop-direct-orders-get"
+BOT_VERSION = "19.0"
+BOT_BUILD = "2026-07-22-order-card-redesign"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -3416,65 +3416,69 @@ def _format_order_notification(order):
         _order_text(_order_value(customer, "email", default=""))
         or _order_text(_order_value(order, "delivery_email", "email", "customer_email", default=""))
     )
-    delivery = _order_text(_order_value(
-        order, "delivery", "delivery_type", "shipping", "delivery_name", default=""
-    ))
-    payment = _order_text(_order_value(
-        order, "payment", "payment_type", "payment_name", default=""
-    ))
+    delivery = _order_text(_order_value(order, "delivery", "delivery_type", "shipping", "delivery_name", default=""))
+    payment = _order_text(_order_value(order, "payment", "payment_type", "payment_name", default=""))
     city = _order_text(_order_value(order, "city", "delivery_city", default=""))
-    address = _order_text(_order_value(
-        order, "address", "delivery_address", "warehouse", "delivery_address_full", default=""
-    ))
-    comment = _order_text(_order_value(
-        order, "comment", "customer_comment", "comments", default=""
-    ))
-    total = _order_value(
-        order, "total", "total_sum", "amount", "sum", "price", "totalPrice", default=0
-    )
+    address = _order_text(_order_value(order, "address", "delivery_address", "warehouse", "delivery_address_full", default=""))
+    comment = _order_text(_order_value(order, "comment", "customer_comment", "comments", default=""))
+    total = _order_value(order, "total", "total_sum", "amount", "sum", "price", "totalPrice", default=0)
 
     lines = [
-        "🔔 <b>НОВЕ ЗАМОВЛЕННЯ З САЙТУ</b>", "",
-        f"🧾 Номер: <b>#{html.escape(order_number)}</b>",
+        f"🛒 <b>НОВЕ ЗАМОВЛЕННЯ #{html.escape(order_number)}</b>",
+        "",
     ]
     if name:
-        lines.append(f"👤 Клієнт: <b>{html.escape(name)}</b>")
+        lines.append(f"👤 <b>{html.escape(name)}</b>")
     if phone:
-        lines.append(f"📞 Телефон: <code>{html.escape(phone)}</code>")
+        lines.append(f"📞 <code>{html.escape(phone)}</code>")
     if email:
-        lines.append(f"✉️ Email: {html.escape(email)}")
+        lines.append(f"✉️ {html.escape(email)}")
 
     products = _order_products(order)
     if products:
-        lines.extend(["", "🛒 <b>Товари:</b>"])
-        for index, item in enumerate(products[:30], start=1):
-            title = _order_text(_order_value(
-                item, "title", "name", "product_title", "productName", default="Товар"
-            ))
+        lines.extend(["", "━━━━━━━━━━━━━━", "🛍 <b>ТОВАРИ</b>", ""])
+        for item in products[:30]:
+            title = _order_text(_order_value(item, "title", "name", "product_title", "productName", default="Товар"))
             qty = _order_value(item, "quantity", "qty", "count", default=1)
-            price = _order_value(item, "price", "cost", "amount", default="")
-            row = f"{index}. {html.escape(title)} × {html.escape(str(qty))}"
-            if price not in ("", None):
-                row += f" — {_order_money(price)} грн"
+            row = f"• {html.escape(title)}"
             lines.append(row)
+            total_price = _order_value(item, "total_price", "totalPrice", default=None)
+            unit_price = _order_value(item, "price", "cost", "amount", default=None)
+            if total_price not in (None, ""):
+                lines.append(f"  ×{html.escape(str(qty))} — <b>{_order_money(total_price)} грн</b>")
+            elif unit_price not in (None, ""):
+                lines.append(f"  ×{html.escape(str(qty))} — {_order_money(unit_price)} грн/од.")
+            else:
+                lines.append(f"  ×{html.escape(str(qty))}")
 
-    lines.extend(["", f"💰 Сума: <b>{_order_money(total)} грн</b>"])
+    lines.extend(["", "━━━━━━━━━━━━━━", f"💰 <b>ДО СПЛАТИ: {_order_money(total)} грн</b>", ""])
     if delivery:
-        lines.append(f"🚚 Доставка: {html.escape(delivery)}")
+        lines.append(f"🚚 {html.escape(delivery)}")
     if city:
-        lines.append(f"🏙 Місто: {html.escape(city)}")
+        lines.append(f"📍 {html.escape(city)}")
     if address:
-        lines.append(f"📍 Адреса/відділення: {html.escape(address)}")
+        lines.append(f"🏤 {html.escape(address)}")
     if payment:
-        lines.append(f"💳 Оплата: {html.escape(payment)}")
+        lines.append(f"💳 {html.escape(payment)}")
+
     payed = _order_value(order, "payed", default=None)
     if payed is not None:
-        lines.append("✅ Статус оплати: <b>Оплачено</b>" if str(payed) == "1" else "⏳ Статус оплати: не оплачено")
+        if str(payed) == "1":
+            lines.append("✅ <b>Оплачено</b>")
+        else:
+            lines.append("⏳ Не оплачено")
+
     created = _order_text(_order_value(order, "stat_created", "created_at", default=""))
     if created:
-        lines.append(f"🕒 Створено: {html.escape(created)}")
+        try:
+            created_dt = datetime.strptime(created, "%Y-%m-%d %H:%M:%S")
+            created = created_dt.strftime("%d.%m.%Y %H:%M")
+        except (TypeError, ValueError):
+            pass
+        lines.append(f"🕒 {html.escape(created)}")
+
     if comment:
-        lines.extend(["", f"💬 Коментар: {html.escape(comment)}"])
+        lines.extend(["", f"💬 <b>Коментар:</b> {html.escape(comment)}"])
     return "\n".join(lines)
 
 
