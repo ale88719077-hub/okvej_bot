@@ -28,7 +28,7 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "19.1"
+BOT_VERSION = "19.2"
 BOT_BUILD = "2026-07-22-auto-xlsx-price"
 
 logging.basicConfig(level=logging.INFO)
@@ -151,6 +151,7 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🛒 Кошик"),
             KeyboardButton(text="📄 Прайс"),
         ],
+        [KeyboardButton(text="💼 Прайс -5%")],
         [KeyboardButton(text="🚚 Доставка й оплата")],
         [
             KeyboardButton(text="💬 Менеджер"),
@@ -2126,12 +2127,16 @@ async def manual_post_publish(message: Message, state: FSMContext):
 
 
 
-def build_price_xlsx(products, output_path: str):
-    """Створює акуратний актуальний прайс OKVEJ у форматі Excel."""
+def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
+    """Створює актуальний Excel-прайс OKVEJ. Для оптового прайса застосовує знижку."""
     import xlsxwriter
 
+    discount_percent = max(0.0, min(float(discount_percent or 0), 100.0))
+    is_discount = discount_percent > 0
+    sheet_name = f"Прайс -{discount_percent:g}%" if is_discount else "Прайс OKVEJ"
+
     workbook = xlsxwriter.Workbook(output_path, {"constant_memory": True})
-    worksheet = workbook.add_worksheet("Прайс OKVEJ")
+    worksheet = workbook.add_worksheet(sheet_name[:31])
 
     title_format = workbook.add_format({
         "bold": True,
@@ -2158,6 +2163,14 @@ def build_price_xlsx(products, output_path: str):
         "align": "right",
         "valign": "top",
     })
+    discount_price_format = workbook.add_format({
+        "bold": True,
+        "border": 1,
+        "num_format": '#,##0.00 "грн"',
+        "align": "right",
+        "valign": "top",
+        "bg_color": "#E2F0D9",
+    })
     link_format = workbook.add_format({
         "font_color": "#0563C1",
         "underline": True,
@@ -2166,16 +2179,25 @@ def build_price_xlsx(products, output_path: str):
         "valign": "top",
     })
 
-    worksheet.merge_range("A1:G1", "OKVEJ — актуальний прайс", title_format)
+    title = f"OKVEJ — оптовий прайс зі знижкою {discount_percent:g}%" if is_discount else "OKVEJ — актуальний прайс"
+    end_col = 7 if is_discount else 6
+    worksheet.merge_range(0, 0, 0, end_col, title, title_format)
     generated = datetime.now().strftime("%d.%m.%Y %H:%M")
     worksheet.write("A2", f"Оновлено: {generated}", info_format)
     worksheet.write("D2", f"Товарів у наявності: {len(products)}", info_format)
+    if is_discount:
+        worksheet.write("G2", f"Знижка: {discount_percent:g}%", info_format)
 
-    headers = ["№", "Категорія", "Назва товару", "Артикул", "Ціна", "Наявність", "Посилання"]
+    headers = ["№", "Категорія", "Назва товару", "Артикул", "Ціна сайту"]
+    if is_discount:
+        headers.append(f"Ціна -{discount_percent:g}%")
+    headers.extend(["Наявність", "Посилання"])
+
     header_row = 3
     for col, value in enumerate(headers):
         worksheet.write(header_row, col, value, header_format)
 
+    discount_factor = 1 - discount_percent / 100
     for index, product in enumerate(products, start=1):
         row = header_row + index
         title = clean_product_title(localize(product.get("title")))
@@ -2189,11 +2211,16 @@ def build_price_xlsx(products, output_path: str):
         worksheet.write(row, 2, title, text_format)
         worksheet.write(row, 3, article, center_format)
         worksheet.write_number(row, 4, price, price_format)
-        worksheet.write(row, 5, "В наявності", center_format)
-        worksheet.write_url(row, 6, link, link_format, "Відкрити")
+        next_col = 5
+        if is_discount:
+            discounted_price = round(price * discount_factor, 2)
+            worksheet.write_number(row, next_col, discounted_price, discount_price_format)
+            next_col += 1
+        worksheet.write(row, next_col, "В наявності", center_format)
+        worksheet.write_url(row, next_col + 1, link, link_format, "Відкрити")
 
     last_row = header_row + len(products)
-    worksheet.autofilter(header_row, 0, last_row, 6)
+    worksheet.autofilter(header_row, 0, last_row, end_col)
     worksheet.freeze_panes(header_row + 1, 0)
     worksheet.set_row(0, 30)
     worksheet.set_row(header_row, 25)
@@ -2201,17 +2228,23 @@ def build_price_xlsx(products, output_path: str):
     worksheet.set_column("B:B", 22)
     worksheet.set_column("C:C", 48)
     worksheet.set_column("D:D", 16)
-    worksheet.set_column("E:E", 15)
-    worksheet.set_column("F:F", 16)
-    worksheet.set_column("G:G", 14)
+    worksheet.set_column("E:F", 16)
+    if is_discount:
+        worksheet.set_column("G:G", 16)
+        worksheet.set_column("H:H", 14)
+    else:
+        worksheet.set_column("F:F", 16)
+        worksheet.set_column("G:G", 14)
     worksheet.set_landscape()
     worksheet.fit_to_pages(1, 0)
     worksheet.set_margins(0.25, 0.25, 0.5, 0.5)
     workbook.close()
 
 
-async def send_current_price(message: Message):
-    loading = await message.answer("⏳ Формую актуальний прайс із Хорошопу...")
+async def send_current_price(message: Message, discount_percent: float = 0):
+    is_discount = discount_percent > 0
+    loading_text = "⏳ Формую оптовий прайс зі знижкою 5%..." if is_discount else "⏳ Формую актуальний прайс із Хорошопу..."
+    loading = await message.answer(loading_text)
     temp_path = None
     try:
         products = await get_in_stock_products(force_refresh=True)
@@ -2219,22 +2252,26 @@ async def send_current_price(message: Message):
             products,
             key=lambda p: (category_sort_key(category_name(p)), clean_product_title(localize(p.get("title"))).lower()),
         )
-        filename = f"OKVEJ_Price_{datetime.now().strftime('%d-%m-%Y')}.xlsx"
+        date_part = datetime.now().strftime('%d-%m-%Y')
+        filename = f"OKVEJ_Wholesale_Price_-5pct_{date_part}.xlsx" if is_discount else f"OKVEJ_Price_{date_part}.xlsx"
         temp_dir = tempfile.mkdtemp(prefix="okvej_price_")
         temp_path = str(Path(temp_dir) / filename)
-        await asyncio.to_thread(build_price_xlsx, products, temp_path)
+        await asyncio.to_thread(build_price_xlsx, products, temp_path, discount_percent)
 
+        caption_title = "Оптовий прайс OKVEJ зі знижкою 5%" if is_discount else "Актуальний прайс OKVEJ"
         await message.answer_document(
             FSInputFile(temp_path, filename=filename),
             caption=(
-                f"📄 <b>Актуальний прайс OKVEJ</b>\n"
+                f"💼 <b>{caption_title}</b>\n" if is_discount else f"📄 <b>{caption_title}</b>\n"
+            ) + (
                 f"✅ Товарів у наявності: <b>{len(products)}</b>\n"
-                f"🕒 Оновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                + ("🏷 Знижка: <b>5%</b>\n" if is_discount else "")
+                + f"🕒 Оновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
             ),
             parse_mode="HTML",
         )
         await loading.delete()
-    except Exception as error:
+    except Exception:
         logging.exception("Price generation error")
         await loading.edit_text(
             "❌ Не вдалося сформувати прайс. Перевірте логи Railway і спробуйте ще раз."
@@ -2255,9 +2292,19 @@ async def price_command(message: Message):
     await send_current_price(message)
 
 
+@dp.message(Command("price5"))
+async def wholesale_price_command(message: Message):
+    await send_current_price(message, discount_percent=5)
+
+
 @dp.message(F.text == "📄 Прайс")
 async def price_button(message: Message):
     await send_current_price(message)
+
+
+@dp.message(F.text == "💼 Прайс -5%")
+async def wholesale_price_button(message: Message):
+    await send_current_price(message, discount_percent=5)
 
 
 @dp.message(Command("analytics"))
