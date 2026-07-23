@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "20.2"
-BOT_BUILD = "2026-07-23-safe-google-errors-timeout"
+BOT_VERSION = "21.0"
+BOT_BUILD = "2026-07-23-seo-pro-page-losses"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -172,7 +172,7 @@ from analytics_seo import log_google_config_status
 
 main_menu = add_admin_buttons(main_menu)
 dp.include_router(analytics_seo_router)
-logging.info("Analytics/SEO router registered directly in bot.py")
+logging.info("SEO Pro router registered directly in bot.py")
 log_google_config_status()
 
 
@@ -2369,9 +2369,8 @@ async def commands_handler(message: Message):
         "/analytics — аналітика за весь час\n"
         "/analytics_today — аналітика за сьогодні\n"
         "/analytics_reset — очистити внутрішню аналітику\n"
-        "/stats — продажі з Horoshop\n"
         "/seo — дані Google Search Console\n"
-        "/panel — панель продажів та SEO\n"
+        "/panel — SEO-панель\n"
         "/commands — список швидких команд",
         parse_mode="HTML",
         reply_markup=main_menu,
