@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "20.1"
-BOT_BUILD = "2026-07-23-google-config-diagnostics"
+BOT_VERSION = "20.2"
+BOT_BUILD = "2026-07-23-safe-google-errors-timeout"
 
 logging.basicConfig(level=logging.INFO)
 

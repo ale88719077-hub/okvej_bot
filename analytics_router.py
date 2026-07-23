@@ -1,3 +1,5 @@
+import asyncio
+import html
 import logging
 import os
 
@@ -108,15 +110,23 @@ async def stats_callback(callback: CallbackQuery) -> None:
     await callback.answer("Получаю данные Хорошоп…")
 
     try:
-        text = await sales_period_text(period)
+        text = await asyncio.wait_for(sales_period_text(period), timeout=60)
         if callback.message:
             await callback.message.answer(text, parse_mode="HTML")
+    except asyncio.TimeoutError:
+        logging.error("Horoshop sales analytics timed out")
+        if callback.message:
+            await callback.message.answer(
+                "⏱ <b>Хорошоп не ответил за 60 секунд.</b>\n\n"
+                "Повторите запрос позже или проверьте HOROSHOP_ORDERS_ENDPOINT.",
+                parse_mode="HTML",
+            )
     except Exception as exc:
         logging.exception("Cannot load Horoshop sales analytics")
         if callback.message:
             await callback.message.answer(
                 "❌ <b>Не удалось получить аналитику продаж.</b>\n\n"
-                f"<code>{str(exc)[:1200]}</code>\n\n"
+                f"<code>{html.escape(str(exc)[:1200])}</code>\n\n"
                 "Проверьте HOROSHOP_LOGIN, HOROSHOP_PASSWORD и "
                 "HOROSHOP_ORDERS_ENDPOINT в Railway.",
                 parse_mode="HTML",
@@ -152,19 +162,27 @@ async def seo_callback(callback: CallbackQuery) -> None:
     await callback.answer("Получаю данные Search Console…")
 
     try:
-        text = await seo_report_text(days)
+        text = await asyncio.wait_for(seo_report_text(days), timeout=60)
         if callback.message:
             await callback.message.answer(
                 text,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
+    except asyncio.TimeoutError:
+        logging.error("Google Search Console request timed out")
+        if callback.message:
+            await callback.message.answer(
+                "⏱ <b>Google Search Console не ответил за 60 секунд.</b>\n\n"
+                "Повторите запрос позже и проверьте доступ сервисного аккаунта к ресурсу.",
+                parse_mode="HTML",
+            )
     except Exception as exc:
         logging.exception("Cannot load Google Search Console analytics")
         if callback.message:
             await callback.message.answer(
                 "❌ <b>Не удалось получить SEO-данные.</b>\n\n"
-                f"<code>{str(exc)[:1200]}</code>\n\n"
+                f"<code>{html.escape(str(exc)[:1200])}</code>\n\n"
                 "Проверьте GSC_SITE_URL и ключ сервисного аккаунта Google.",
                 parse_mode="HTML",
             )
