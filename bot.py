@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "19.2"
-BOT_BUILD = "2026-07-22-price-brand-filter"
+BOT_VERSION = "20.0"
+BOT_BUILD = "2026-07-23-integrated-analytics-seo"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -165,6 +165,13 @@ main_menu = ReplyKeyboardMarkup(
     is_persistent=True,
 )
 
+# Analytics and SEO are registered directly in bot.py before the rest of the
+# message handlers. This avoids launcher/import-order issues on Railway.
+from analytics_router import add_admin_buttons, router as analytics_seo_router
+
+main_menu = add_admin_buttons(main_menu)
+dp.include_router(analytics_seo_router)
+logging.info("Analytics/SEO router registered directly in bot.py")
 
 
 def localize(value):
@@ -2359,7 +2366,10 @@ async def commands_handler(message: Message):
         "/myid — показати Telegram ID\n"
         "/analytics — аналітика за весь час\n"
         "/analytics_today — аналітика за сьогодні\n"
-        "/analytics_reset — очистити аналітику\n"
+        "/analytics_reset — очистити внутрішню аналітику\n"
+        "/stats — продажі з Horoshop\n"
+        "/seo — дані Google Search Console\n"
+        "/panel — панель продажів та SEO\n"
         "/commands — список швидких команд",
         parse_mode="HTML",
         reply_markup=main_menu,
