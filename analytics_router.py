@@ -5,188 +5,123 @@ import os
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    Message,
-    ReplyKeyboardMarkup,
-)
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 
-from analytics_seo import google_config_diagnostics, seo_report_text
+from analytics_seo import google_config_diagnostics, growth_opportunities_text, improve_page_text, page_report_text, query_report_text, seo_report_text
 
-router = Router(name="okvej_seo_pro")
+router = Router(name="okvej_seo_free")
 
+class SeoInput(StatesGroup):
+    query = State()
+    page = State()
 
-def admin_id() -> str:
-    return (
-        os.getenv("ADMIN_USER_ID")
-        or os.getenv("ADMIN_CHAT_ID")
-        or os.getenv("MANAGER_CHAT_ID")
-        or ""
-    ).strip()
+def admin_id():
+    return (os.getenv("ADMIN_USER_ID") or os.getenv("ADMIN_CHAT_ID") or os.getenv("MANAGER_CHAT_ID") or "").strip()
 
+def is_admin(user_id):
+    return bool(admin_id()) and str(user_id) == admin_id()
 
-def is_admin(user_id: int) -> bool:
-    configured = admin_id()
-    return bool(configured) and str(user_id) == configured
-
-
-def seo_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="SEO за 7 дней", callback_data="seo:7")],
-            [InlineKeyboardButton(text="SEO за 28 дней", callback_data="seo:28")],
-            [
-                InlineKeyboardButton(
-                    text="📉 Что просело за 7 дней",
-                    callback_data="seo:losses:7",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📉 Что просело за 28 дней",
-                    callback_data="seo:losses:28",
-                )
-            ],
-        ]
-    )
-
+def seo_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="SEO за 7 дней", callback_data="seo:7")],
+        [InlineKeyboardButton(text="SEO за 28 дней", callback_data="seo:28")],
+        [InlineKeyboardButton(text="📉 Что просело", callback_data="seo:losses:28")],
+        [InlineKeyboardButton(text="🔎 Проверить запрос", callback_data="seo:ask_query")],
+        [InlineKeyboardButton(text="📄 Анализ страницы", callback_data="seo:ask_page")],
+        [InlineKeyboardButton(text="🏆 Возможности роста", callback_data="seo:growth")],
+    ])
 
 def add_admin_buttons(old_menu):
     try:
         rows = [list(row) for row in old_menu.keyboard]
     except Exception:
         rows = []
+    rows = [[b for b in row if getattr(b, "text", "") != "📊 Аналитика"] for row in rows]
+    rows = [r for r in rows if r]
+    labels = {getattr(b, "text", "") for row in rows for b in row}
+    for label in ("📈 SEO", "🔎 Проверить запрос", "📄 Анализ страницы", "🏆 Возможности роста"):
+        if label not in labels:
+            rows.append([KeyboardButton(text=label)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
-    cleaned_rows = []
-    for row in rows:
-        filtered = [
-            button
-            for button in row
-            if getattr(button, "text", "") != "📊 Аналитика"
-        ]
-        if filtered:
-            cleaned_rows.append(filtered)
-    rows = cleaned_rows
-
-    button_texts = {
-        getattr(button, "text", "")
-        for row in rows
-        for button in row
-    }
-    if "📈 SEO" not in button_texts:
-        rows.append([KeyboardButton(text="📈 SEO")])
-
-    return ReplyKeyboardMarkup(
-        keyboard=rows,
-        resize_keyboard=True,
-        is_persistent=getattr(old_menu, "is_persistent", True),
-    )
-
-
-async def deny(message_or_callback) -> None:
-    if isinstance(message_or_callback, CallbackQuery):
-        await message_or_callback.answer("Нет доступа", show_alert=True)
-
+async def safe(message, coro):
+    try:
+        text = await asyncio.wait_for(coro, timeout=90)
+        await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+    except asyncio.TimeoutError:
+        await message.answer("⏱ Google Search Console не ответил за 90 секунд.")
+    except Exception as exc:
+        logging.exception("SEO request failed")
+        await message.answer(f"❌ <b>Ошибка SEO</b>\n<code>{html.escape(str(exc)[:1000])}</code>", parse_mode="HTML")
 
 @router.message(Command("seo"))
 @router.message(F.text == "📈 SEO")
-async def seo_menu(message: Message) -> None:
-    if not message.from_user or not is_admin(message.from_user.id):
-        await deny(message)
-        return
-
-    await message.answer(
-        "📈 <b>SEO-мониторинг OKVEJ</b>\n\n"
-        "Выберите период или посмотрите страницы, которые просели:",
-        parse_mode="HTML",
-        reply_markup=seo_keyboard(),
-    )
-
+async def menu(message: Message):
+    if message.from_user and is_admin(message.from_user.id):
+        await message.answer("📈 <b>SEO-панель OKVEJ</b>", parse_mode="HTML", reply_markup=seo_keyboard())
 
 @router.callback_query(F.data.startswith("seo:"))
-async def seo_callback(callback: CallbackQuery) -> None:
+async def callback(callback: CallbackQuery, state: FSMContext):
     if not callback.from_user or not is_admin(callback.from_user.id):
-        await deny(callback)
-        return
+        await callback.answer("Нет доступа", show_alert=True); return
+    action = (callback.data or "").split(":")[1]
+    await callback.answer()
+    if action == "ask_query":
+        await state.set_state(SeoInput.query); await callback.message.answer("Введите поисковый запрос:"); return
+    if action == "ask_page":
+        await state.set_state(SeoInput.page); await callback.message.answer("Введите страницу, например /ua/:"); return
+    if action == "growth":
+        await safe(callback.message, growth_opportunities_text()); return
+    parts = callback.data.split(":")
+    await safe(callback.message, seo_report_text(days=int(parts[-1]), losses_only=action == "losses"))
 
-    parts = (callback.data or "").split(":")
-    losses_only = len(parts) >= 3 and parts[1] == "losses"
+@router.message(F.text == "🔎 Проверить запрос")
+async def query_button(message: Message, state: FSMContext):
+    if message.from_user and is_admin(message.from_user.id):
+        await state.set_state(SeoInput.query); await message.answer("Введите поисковый запрос:")
 
-    try:
-        days = int(parts[-1])
-    except (ValueError, IndexError):
-        await callback.answer("Некорректный период", show_alert=True)
-        return
+@router.message(F.text == "📄 Анализ страницы")
+async def page_button(message: Message, state: FSMContext):
+    if message.from_user and is_admin(message.from_user.id):
+        await state.set_state(SeoInput.page); await message.answer("Введите страницу, например /ua/:")
 
-    await callback.answer("Получаю данные Search Console…")
+@router.message(F.text == "🏆 Возможности роста")
+async def growth_button(message: Message):
+    if message.from_user and is_admin(message.from_user.id):
+        await safe(message, growth_opportunities_text())
 
-    try:
-        text = await asyncio.wait_for(
-            seo_report_text(days=days, losses_only=losses_only),
-            timeout=75,
-        )
-        if callback.message:
-            await callback.message.answer(
-                text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-    except asyncio.TimeoutError:
-        logging.error("Google Search Console request timed out")
-        if callback.message:
-            await callback.message.answer(
-                "⏱ <b>Google Search Console не ответил за 75 секунд.</b>\n\n"
-                "Повторите запрос позже.",
-                parse_mode="HTML",
-            )
-    except Exception as exc:
-        logging.exception("Cannot load Google Search Console analytics")
-        if callback.message:
-            await callback.message.answer(
-                "❌ <b>Не удалось получить SEO-данные.</b>\n\n"
-                f"<code>{html.escape(str(exc)[:1200])}</code>\n\n"
-                "Проверьте GSC_SITE_URL и доступ сервисного аккаунта.",
-                parse_mode="HTML",
-            )
+@router.message(SeoInput.query)
+async def query_state(message: Message, state: FSMContext):
+    await state.clear(); await safe(message, query_report_text(message.text or ""))
 
+@router.message(SeoInput.page)
+async def page_state(message: Message, state: FSMContext):
+    await state.clear(); await safe(message, page_report_text(message.text or ""))
+
+@router.message(Command("query"))
+async def query_cmd(message: Message):
+    if message.from_user and is_admin(message.from_user.id):
+        await safe(message, query_report_text((message.text or "").partition(" ")[2]))
+
+@router.message(Command("page"))
+async def page_cmd(message: Message):
+    if message.from_user and is_admin(message.from_user.id):
+        await safe(message, page_report_text((message.text or "").partition(" ")[2]))
+
+@router.message(Command("improve"))
+async def improve_cmd(message: Message):
+    if message.from_user and is_admin(message.from_user.id):
+        await safe(message, improve_page_text((message.text or "").partition(" ")[2]))
 
 @router.message(Command("panel"))
-async def admin_panel(message: Message) -> None:
-    if not message.from_user or not is_admin(message.from_user.id):
-        await deny(message)
-        return
-
-    await message.answer(
-        "⚙️ <b>SEO-панель OKVEJ</b>",
-        parse_mode="HTML",
-        reply_markup=seo_keyboard(),
-    )
-
+async def panel(message: Message):
+    if message.from_user and is_admin(message.from_user.id):
+        await message.answer("⚙️ <b>SEO-панель OKVEJ</b>", parse_mode="HTML", reply_markup=seo_keyboard())
 
 @router.message(Command("diag"))
-async def diagnostics_panel(message: Message) -> None:
-    if not message.from_user or not is_admin(message.from_user.id):
-        await deny(message)
-        return
-
-    info = google_config_diagnostics()
-    text = (
-        "🧪 <b>Диагностика SEO OKVEJ</b>\n\n"
-        f"Администратор: <b>{'найден' if admin_id() else 'не задан'}</b>\n"
-        f"Google-ключ: <b>{info['method']}</b>\n"
-        f"GOOGLE_SERVICE_ACCOUNT_JSON: "
-        f"<b>{'есть' if info['json_set'] else 'нет'}</b> "
-        f"({info['json_length']} символов)\n"
-        f"GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "
-        f"<b>{'есть' if info['base64_set'] else 'нет'}</b> "
-        f"({info['base64_length']} символов)\n"
-        f"GOOGLE_SERVICE_ACCOUNT_FILE: "
-        f"<b>{'есть' if info['file_set'] else 'нет'}</b>\n"
-        f"Файл существует: <b>{'да' if info['file_exists'] else 'нет'}</b>\n"
-        f"GSC_SITE_URL: "
-        f"<b>{'задан' if info['gsc_site_url_set'] else 'не задан'}</b>"
-    )
-    await message.answer(text, parse_mode="HTML")
+async def diag(message: Message):
+    if message.from_user and is_admin(message.from_user.id):
+        info = google_config_diagnostics()
+        await message.answer(f"🧪 <b>Диагностика SEO</b>\nGoogle-ключ: <b>{info['method']}</b>\nGSC_SITE_URL: <b>{'задан' if info['gsc_site_url_set'] else 'не задан'}</b>", parse_mode="HTML")

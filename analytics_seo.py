@@ -309,3 +309,163 @@ async def seo_report_text(days: int = 7, losses_only: bool = False) -> str:
     lines += ["", *_losses_block(losses)]
     lines += ["", "ℹ️ Сравнение выполнено с предыдущим равным периодом."]
     return "\n".join(lines)
+
+async def _filtered_rows(start, end, dimensions, filters=None, limit=25000):
+    service = _search_console_service()
+    body = {
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "dimensions": dimensions,
+        "rowLimit": limit,
+        "dataState": "final",
+    }
+    if filters:
+        body["dimensionFilterGroups"] = [{"groupType": "and", "filters": filters}]
+
+    def execute():
+        return service.searchanalytics().query(siteUrl=_site_url(), body=body).execute()
+
+    result = await asyncio.to_thread(execute)
+    return result.get("rows") or []
+
+
+def _period(days=28):
+    end = date.today() - timedelta(days=2)
+    start = end - timedelta(days=days - 1)
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=days - 1)
+    return start, end, prev_start, prev_end
+
+
+def _page_url(page):
+    page = page.strip()
+    if page.startswith("http://") or page.startswith("https://"):
+        return page
+    site = _site_url()
+    base = "https://" + site.split(":", 1)[1] if site.startswith("sc-domain:") else site.rstrip("/")
+    return base.rstrip("/") + "/" + page.strip("/") + "/"
+
+
+def _aggregate(rows, key_index=0):
+    result = {}
+    for row in rows:
+        keys = row.get("keys") or []
+        if len(keys) <= key_index:
+            continue
+        result[str(keys[key_index])] = {
+            "clicks": float(row.get("clicks", 0)),
+            "impressions": float(row.get("impressions", 0)),
+            "ctr": float(row.get("ctr", 0)),
+            "position": float(row.get("position", 0)),
+        }
+    return result
+
+
+async def query_report_text(query: str, days: int = 28) -> str:
+    query = query.strip()
+    if not query:
+        return "Введите запрос после команды: <code>/query купити цукерки</code>"
+    start, end, ps, pe = _period(days)
+    flt = [{"dimension": "query", "operator": "equals", "expression": query}]
+    now_rows, old_rows = await asyncio.gather(
+        _filtered_rows(start, end, ["query", "page"], flt, 5000),
+        _filtered_rows(ps, pe, ["query", "page"], flt, 5000),
+    )
+    now = _aggregate(now_rows, 1)
+    old = _aggregate(old_rows, 1)
+    pages = sorted(set(now) | set(old), key=lambda p: now.get(p, {}).get("clicks", 0), reverse=True)
+    lines = [
+        f"🔎 <b>Запрос: {html.escape(query)}</b>",
+        f"Период: {start:%d.%m}–{end:%d.%m}",
+        "",
+    ]
+    if not pages:
+        lines.append("Данных по запросу нет.")
+        return "\n".join(lines)
+    for page in pages[:5]:
+        a = old.get(page, {"position":0,"clicks":0,"impressions":0,"ctr":0})
+        b = now.get(page, {"position":0,"clicks":0,"impressions":0,"ctr":0})
+        delta = b["position"] - a["position"]
+        mark = "▲" if delta < 0 else ("▼" if delta > 0 else "=")
+        lines += [
+            f"<b>{_short_page(page)}</b>",
+            f"Позиция: <b>{a['position']:.1f} → {b['position']:.1f}</b> {mark} ({delta:+.1f})",
+            f"Клики: {a['clicks']:.0f} → {b['clicks']:.0f}",
+            f"Показы: {a['impressions']:.0f} → {b['impressions']:.0f}",
+            f"CTR: {a['ctr']*100:.2f}% → {b['ctr']*100:.2f}%",
+            "",
+        ]
+    return "\n".join(lines)
+
+
+async def page_report_text(page: str, days: int = 28) -> str:
+    if not page.strip():
+        return "Введите страницу: <code>/page /ua/</code>"
+    url = _page_url(page)
+    start, end, ps, pe = _period(days)
+    flt = [{"dimension": "page", "operator": "equals", "expression": url}]
+    now_rows, old_rows = await asyncio.gather(
+        _filtered_rows(start, end, ["query"], flt),
+        _filtered_rows(ps, pe, ["query"], flt),
+    )
+    now, old = _aggregate(now_rows), _aggregate(old_rows)
+    queries = sorted(set(now) | set(old), key=lambda q: now.get(q, {}).get("clicks", 0), reverse=True)
+    lines = [f"📄 <b>Страница: {_short_page(url)}</b>", f"Период: {start:%d.%m}–{end:%d.%m}", "", "<b>Топ запросов:</b>"]
+    if not queries:
+        lines.append("Данных по странице нет.")
+        return "\n".join(lines)
+    for q in queries[:10]:
+        a = old.get(q, {"position":0,"clicks":0,"impressions":0})
+        b = now.get(q, {"position":0,"clicks":0,"impressions":0})
+        lines += [
+            f"• <b>{html.escape(q)}</b>",
+            f"  позиция {a['position']:.1f} → {b['position']:.1f} · клики {a['clicks']:.0f} → {b['clicks']:.0f} · показы {a['impressions']:.0f} → {b['impressions']:.0f}",
+        ]
+    return "\n".join(lines)
+
+
+async def growth_opportunities_text(days: int = 28) -> str:
+    start, end, _, _ = _period(days)
+    rows = await search_console_rows(start, end, "query", 25000)
+    items = []
+    for row in rows:
+        keys = row.get("keys") or []
+        if not keys:
+            continue
+        pos = float(row.get("position", 0)); imp = float(row.get("impressions", 0)); ctr = float(row.get("ctr", 0))
+        if 4 <= pos <= 15 and imp >= 100 and ctr <= 0.05:
+            items.append((imp * (0.06-ctr) / pos, str(keys[0]), pos, imp, ctr, float(row.get("clicks",0))))
+    items.sort(reverse=True)
+    lines = [f"🏆 <b>Возможности роста — {start:%d.%m}–{end:%d.%m}</b>", ""]
+    if not items:
+        lines.append("Подходящих запросов не найдено.")
+    for _, q, pos, imp, ctr, clicks in items[:10]:
+        lines += [f"• <b>{html.escape(q)}</b>", f"  позиция {pos:.1f} · показы {imp:.0f} · CTR {ctr*100:.2f}% · клики {clicks:.0f}"]
+    return "\n".join(lines)
+
+
+async def improve_page_text(page: str, days: int = 28) -> str:
+    if not page.strip():
+        return "Введите страницу: <code>/improve /ua/</code>"
+    url = _page_url(page)
+    start, end, _, _ = _period(days)
+    flt = [{"dimension": "page", "operator": "equals", "expression": url}]
+    rows = await _filtered_rows(start, end, ["query"], flt)
+    data = []
+    for row in rows:
+        keys = row.get("keys") or []
+        if keys:
+            data.append({"q":str(keys[0]),"clicks":float(row.get("clicks",0)),"imp":float(row.get("impressions",0)),"ctr":float(row.get("ctr",0)),"pos":float(row.get("position",0))})
+    data.sort(key=lambda x: x["imp"], reverse=True)
+    if not data:
+        return f"🤖 <b>AI SEO Free: {_short_page(url)}</b>\n\nДанных Search Console нет."
+    top = data[:5]
+    main = top[0]["q"]
+    ua = "/ua/" in url
+    title = f"{main.capitalize()} — купити в Україні | OKVEJ" if ua else f"{main.capitalize()} — купить в Украине | OKVEJ"
+    desc = (f"Купуйте {main} в інтернет-магазині OKVEJ. Актуальні ціни, товари в наявності та доставка по Україні." if ua else f"Купите {main} в интернет-магазине OKVEJ. Актуальные цены, товары в наличии и доставка по Украине.")
+    lines = [f"🤖 <b>AI SEO Free: {_short_page(url)}</b>", "", "<b>Основные запросы:</b>"]
+    for x in top:
+        lines.append(f"• {html.escape(x['q'])} — позиция {x['pos']:.1f}, показы {x['imp']:.0f}, CTR {x['ctr']*100:.2f}%")
+    lines += ["", "<b>Рекомендации:</b>", "• Улучшить Title и Description под главный запрос.", "• Добавить основной запрос в H1 и первый абзац естественно.", "• Добавить 3–5 внутренних ссылок на релевантные категории и бренды.", "• Для запросов на позициях 4–15 расширить текст и FAQ.", "", "<b>Черновик Title:</b>", html.escape(title[:70]), "", "<b>Черновик Description:</b>", html.escape(desc[:160])]
+    return "\n".join(lines)

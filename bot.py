@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "21.0"
-BOT_BUILD = "2026-07-23-seo-pro-page-losses"
+BOT_VERSION = "22.0"
+BOT_BUILD = "2026-07-23-seo-free-query-page-growth"
 
 logging.basicConfig(level=logging.INFO)
 
