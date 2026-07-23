@@ -50,17 +50,60 @@ def _parse_date(value: Any) -> datetime | None:
 
 
 def _service_account_info() -> dict:
+    """Load Google service-account credentials.
+
+    Priority:
+    1. GOOGLE_SERVICE_ACCOUNT_FILE — path to a JSON file.
+    2. GOOGLE_SERVICE_ACCOUNT_JSON — raw JSON in an environment variable.
+    3. GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 — Base64-encoded JSON.
+    """
+    file_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
     raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     raw_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", "").strip()
 
+    if file_path:
+        path = os.path.abspath(file_path)
+        if not os.path.isfile(path):
+            raise RuntimeError(
+                f"Файл сервисного аккаунта Google не найден: {path}"
+            )
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Не удалось прочитать JSON-файл сервисного аккаунта: {path}"
+            ) from exc
+
+        if data.get("type") != "service_account":
+            raise RuntimeError(
+                "В GOOGLE_SERVICE_ACCOUNT_FILE указан не service_account JSON"
+            )
+        return data
+
     if raw_b64:
-        raw = base64.b64decode(raw_b64).decode("utf-8")
+        try:
+            raw = base64.b64decode(raw_b64).decode("utf-8")
+        except Exception as exc:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 содержит некорректный Base64"
+            ) from exc
 
     if not raw:
         raise RuntimeError(
-            "Не задан GOOGLE_SERVICE_ACCOUNT_JSON или GOOGLE_SERVICE_ACCOUNT_JSON_BASE64"
+            "Не задан GOOGLE_SERVICE_ACCOUNT_FILE, "
+            "GOOGLE_SERVICE_ACCOUNT_JSON или "
+            "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64"
         )
-    return json.loads(raw)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Некорректный JSON сервисного аккаунта Google") from exc
+
+    if data.get("type") != "service_account":
+        raise RuntimeError("Указан не service_account JSON")
+    return data
 
 
 def _google_credentials(scopes: list[str]):
