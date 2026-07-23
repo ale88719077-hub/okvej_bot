@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -11,6 +12,51 @@ import aiohttp
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+
+
+def google_config_diagnostics() -> dict:
+    """Return safe Google configuration diagnostics without exposing secrets."""
+    file_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    raw_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", "").strip()
+    site_url = os.getenv("GSC_SITE_URL", "").strip()
+
+    if file_path:
+        method = "FILE"
+    elif raw:
+        method = "JSON"
+    elif raw_b64:
+        method = "BASE64"
+    else:
+        method = "NONE"
+
+    return {
+        "method": method,
+        "file_set": bool(file_path),
+        "file_exists": bool(file_path and os.path.isfile(os.path.abspath(file_path))),
+        "json_set": bool(raw),
+        "json_length": len(raw),
+        "base64_set": bool(raw_b64),
+        "base64_length": len(raw_b64),
+        "gsc_site_url_set": bool(site_url),
+        "gsc_site_url": site_url,
+    }
+
+
+def log_google_config_status() -> None:
+    info = google_config_diagnostics()
+    logging.info(
+        "Google config: method=%s file_set=%s file_exists=%s json_set=%s "
+        "json_length=%s base64_set=%s base64_length=%s gsc_site_url_set=%s",
+        info["method"],
+        info["file_set"],
+        info["file_exists"],
+        info["json_set"],
+        info["json_length"],
+        info["base64_set"],
+        info["base64_length"],
+        info["gsc_site_url_set"],
+    )
 
 def _num(value: Any) -> float:
     if value is None:

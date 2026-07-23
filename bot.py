@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "20.0"
-BOT_BUILD = "2026-07-23-integrated-analytics-seo"
+BOT_VERSION = "20.1"
+BOT_BUILD = "2026-07-23-google-config-diagnostics"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -168,10 +168,12 @@ main_menu = ReplyKeyboardMarkup(
 # Analytics and SEO are registered directly in bot.py before the rest of the
 # message handlers. This avoids launcher/import-order issues on Railway.
 from analytics_router import add_admin_buttons, router as analytics_seo_router
+from analytics_seo import log_google_config_status
 
 main_menu = add_admin_buttons(main_menu)
 dp.include_router(analytics_seo_router)
 logging.info("Analytics/SEO router registered directly in bot.py")
+log_google_config_status()
 
 
 def localize(value):

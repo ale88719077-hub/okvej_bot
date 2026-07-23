@@ -12,7 +12,11 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from analytics_seo import sales_period_text, seo_report_text
+from analytics_seo import (
+    google_config_diagnostics,
+    sales_period_text,
+    seo_report_text,
+)
 
 router = Router(name="okvej_analytics_seo")
 
@@ -186,3 +190,26 @@ async def admin_panel(message: Message) -> None:
         parse_mode="HTML",
         reply_markup=keyboard,
     )
+
+
+@router.message(Command("diag"))
+async def diagnostics_panel(message: Message) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
+        await deny(message)
+        return
+
+    info = google_config_diagnostics()
+    admin_configured = bool(admin_id())
+    text = (
+        "🧪 <b>Диагностика OKVEJ</b>\n\n"
+        f"Администратор: <b>{'найден' if admin_configured else 'не задан'}</b>\n"
+        f"Google-ключ: <b>{info['method']}</b>\n"
+        f"GOOGLE_SERVICE_ACCOUNT_JSON: <b>{'есть' if info['json_set'] else 'нет'}</b> "
+        f"({info['json_length']} символов)\n"
+        f"GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: <b>{'есть' if info['base64_set'] else 'нет'}</b> "
+        f"({info['base64_length']} символов)\n"
+        f"GOOGLE_SERVICE_ACCOUNT_FILE: <b>{'есть' if info['file_set'] else 'нет'}</b>\n"
+        f"Файл существует: <b>{'да' if info['file_exists'] else 'нет'}</b>\n"
+        f"GSC_SITE_URL: <b>{'задан' if info['gsc_site_url_set'] else 'не задан'}</b>"
+    )
+    await message.answer(text, parse_mode="HTML")
