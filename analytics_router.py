@@ -1,3 +1,4 @@
+import logging
 import os
 
 from aiogram import F, Router
@@ -18,7 +19,8 @@ router = Router(name="okvej_analytics_seo")
 
 def admin_id() -> str:
     return (
-        os.getenv("ADMIN_CHAT_ID")
+        os.getenv("ADMIN_USER_ID")
+        or os.getenv("ADMIN_CHAT_ID")
         or os.getenv("MANAGER_CHAT_ID")
         or ""
     ).strip()
@@ -44,24 +46,13 @@ def analytics_keyboard() -> InlineKeyboardMarkup:
 def seo_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="SEO за 7 дней",
-                    callback_data="seo:7",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="SEO за 28 дней",
-                    callback_data="seo:28",
-                )
-            ],
+            [InlineKeyboardButton(text="SEO за 7 дней", callback_data="seo:7")],
+            [InlineKeyboardButton(text="SEO за 28 дней", callback_data="seo:28")],
         ]
     )
 
 
 def add_admin_buttons(old_menu):
-    """Adds the private analytics row while preserving the current menu."""
     try:
         rows = [list(row) for row in old_menu.keyboard]
     except Exception:
@@ -73,32 +64,29 @@ def add_admin_buttons(old_menu):
         for button in row
     }
 
-    if "📊 Аналитика" not in button_texts and "📈 SEO" not in button_texts:
-        rows.append(
-            [
-                KeyboardButton(text="📊 Аналитика"),
-                KeyboardButton(text="📈 SEO"),
-            ]
-        )
+    new_row = []
+    if "📊 Аналитика" not in button_texts:
+        new_row.append(KeyboardButton(text="📊 Аналитика"))
+    if "📈 SEO" not in button_texts:
+        new_row.append(KeyboardButton(text="📈 SEO"))
+    if new_row:
+        rows.append(new_row)
 
-    return ReplyKeyboardMarkup(
-        keyboard=rows,
-        resize_keyboard=True,
-    )
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-async def deny(message_or_callback):
+async def deny(message_or_callback) -> None:
     if isinstance(message_or_callback, CallbackQuery):
         await message_or_callback.answer("Нет доступа", show_alert=True)
-    # For normal users the hidden admin text buttons should not be advertised.
 
 
 @router.message(Command("stats"))
 @router.message(F.text == "📊 Аналитика")
-async def stats_menu(message: Message):
-    if not is_admin(message.from_user.id):
+async def stats_menu(message: Message) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
         await deny(message)
         return
+
     await message.answer(
         "📊 <b>Аналитика продаж OKVEJ</b>\n\nВыберите период:",
         parse_mode="HTML",
@@ -107,33 +95,37 @@ async def stats_menu(message: Message):
 
 
 @router.callback_query(F.data.startswith("stats:"))
-async def stats_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
+async def stats_callback(callback: CallbackQuery) -> None:
+    if not callback.from_user or not is_admin(callback.from_user.id):
         await deny(callback)
         return
 
-    period = callback.data.split(":", 1)[1]
+    period = (callback.data or "").split(":", 1)[1]
     await callback.answer("Получаю данные Хорошоп…")
 
     try:
         text = await sales_period_text(period)
-        await callback.message.answer(text, parse_mode="HTML")
+        if callback.message:
+            await callback.message.answer(text, parse_mode="HTML")
     except Exception as exc:
-        await callback.message.answer(
-            "❌ <b>Не удалось получить аналитику продаж.</b>\n\n"
-            f"<code>{str(exc)[:1200]}</code>\n\n"
-            "Проверьте HOROSHOP_LOGIN, HOROSHOP_PASSWORD и "
-            "HOROSHOP_ORDERS_ENDPOINT в Railway.",
-            parse_mode="HTML",
-        )
+        logging.exception("Cannot load Horoshop sales analytics")
+        if callback.message:
+            await callback.message.answer(
+                "❌ <b>Не удалось получить аналитику продаж.</b>\n\n"
+                f"<code>{str(exc)[:1200]}</code>\n\n"
+                "Проверьте HOROSHOP_LOGIN, HOROSHOP_PASSWORD и "
+                "HOROSHOP_ORDERS_ENDPOINT в Railway.",
+                parse_mode="HTML",
+            )
 
 
 @router.message(Command("seo"))
 @router.message(F.text == "📈 SEO")
-async def seo_menu(message: Message):
-    if not is_admin(message.from_user.id):
+async def seo_menu(message: Message) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
         await deny(message)
         return
+
     await message.answer(
         "📈 <b>SEO-мониторинг OKVEJ</b>\n\nВыберите период:",
         parse_mode="HTML",
@@ -142,47 +134,49 @@ async def seo_menu(message: Message):
 
 
 @router.callback_query(F.data.startswith("seo:"))
-async def seo_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
+async def seo_callback(callback: CallbackQuery) -> None:
+    if not callback.from_user or not is_admin(callback.from_user.id):
         await deny(callback)
         return
 
-    days = int(callback.data.split(":", 1)[1])
+    try:
+        days = int((callback.data or "").split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректный период", show_alert=True)
+        return
+
     await callback.answer("Получаю данные Search Console…")
 
     try:
         text = await seo_report_text(days)
-        await callback.message.answer(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        if callback.message:
+            await callback.message.answer(
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
     except Exception as exc:
-        await callback.message.answer(
-            "❌ <b>Не удалось получить SEO-данные.</b>\n\n"
-            f"<code>{str(exc)[:1200]}</code>\n\n"
-            "Проверьте GSC_SITE_URL и ключ сервисного аккаунта Google.",
-            parse_mode="HTML",
-        )
+        logging.exception("Cannot load Google Search Console analytics")
+        if callback.message:
+            await callback.message.answer(
+                "❌ <b>Не удалось получить SEO-данные.</b>\n\n"
+                f"<code>{str(exc)[:1200]}</code>\n\n"
+                "Проверьте GSC_SITE_URL и ключ сервисного аккаунта Google.",
+                parse_mode="HTML",
+            )
 
 
 @router.message(Command("panel"))
-async def admin_panel(message: Message):
-    if not is_admin(message.from_user.id):
+async def admin_panel(message: Message) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
         await deny(message)
         return
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="📊 Продажи",
-                    callback_data="stats:today",
-                ),
-                InlineKeyboardButton(
-                    text="📈 SEO",
-                    callback_data="seo:7",
-                ),
+                InlineKeyboardButton(text="📊 Продажи", callback_data="stats:today"),
+                InlineKeyboardButton(text="📈 SEO", callback_data="seo:7"),
             ]
         ]
     )
