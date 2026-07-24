@@ -365,37 +365,97 @@ async def query_report_text(query: str, days: int = 28) -> str:
     query = query.strip()
     if not query:
         return "Введите запрос после команды: <code>/query купити цукерки</code>"
-    start, end, ps, pe = _period(days)
-    flt = [{"dimension": "query", "operator": "equals", "expression": query}]
-    now_rows, old_rows = await asyncio.gather(
-        _filtered_rows(start, end, ["query", "page"], flt, 5000),
-        _filtered_rows(ps, pe, ["query", "page"], flt, 5000),
+
+    current_start, current_end, previous_start, previous_end = _period(days)
+    filters = [{"dimension": "query", "operator": "equals", "expression": query}]
+    current_rows, previous_rows = await asyncio.gather(
+        _filtered_rows(current_start, current_end, ["query", "page"], filters, 5000),
+        _filtered_rows(previous_start, previous_end, ["query", "page"], filters, 5000),
     )
-    now = _aggregate(now_rows, 1)
-    old = _aggregate(old_rows, 1)
-    pages = sorted(set(now) | set(old), key=lambda p: now.get(p, {}).get("clicks", 0), reverse=True)
+    current = _aggregate(current_rows, 1)
+    previous = _aggregate(previous_rows, 1)
+    pages = sorted(
+        set(current) | set(previous),
+        key=lambda page: (
+            current.get(page, {}).get("impressions", 0),
+            previous.get(page, {}).get("impressions", 0),
+        ),
+        reverse=True,
+    )
+
     lines = [
         f"🔎 <b>Запрос: {html.escape(query)}</b>",
-        f"Период: {start:%d.%m}–{end:%d.%m}",
+        "",
+        "📅 <b>Сравнение периодов</b>",
+        f"Предыдущий: <b>{previous_start:%d.%m}–{previous_end:%d.%m}</b>",
+        f"Текущий: <b>{current_start:%d.%m}–{current_end:%d.%m}</b>",
         "",
     ]
     if not pages:
-        lines.append("Данных по запросу нет.")
+        lines.append("Данных по запросу за эти периоды нет.")
         return "\n".join(lines)
+
     for page in pages[:5]:
-        a = old.get(page, {"position":0,"clicks":0,"impressions":0,"ctr":0})
-        b = now.get(page, {"position":0,"clicks":0,"impressions":0,"ctr":0})
-        delta = b["position"] - a["position"]
-        mark = "▲" if delta < 0 else ("▼" if delta > 0 else "=")
+        old = previous.get(page)
+        now = current.get(page)
+        lines.append(f"📄 <b>{_short_page(page)}</b>")
+        lines.append("")
+
+        if old and now:
+            position_change = now["position"] - old["position"]
+            lines.append("📍 <b>Средняя позиция</b>")
+            lines.append(f"<b>{old['position']:.1f} → {now['position']:.1f}</b>")
+            if position_change > 0.1:
+                lines.append(f"🔴 Ухудшение на <b>{position_change:.1f}</b> позиции")
+            elif position_change < -0.1:
+                lines.append(f"🟢 Улучшение на <b>{abs(position_change):.1f}</b> позиции")
+            else:
+                lines.append("🟡 Позиция почти не изменилась")
+        elif old and not now:
+            lines += [
+                "📍 <b>Средняя позиция</b>",
+                f"<b>{old['position']:.1f} → —</b>",
+                "🔴 Страница больше не показывалась по этому запросу в текущем периоде",
+            ]
+        else:
+            lines += [
+                "📍 <b>Средняя позиция</b>",
+                f"<b>— → {now['position']:.1f}</b>",
+                "🟢 Страница начала показываться по этому запросу",
+            ]
+
+        old_clicks = old["clicks"] if old else 0
+        now_clicks = now["clicks"] if now else 0
+        old_impressions = old["impressions"] if old else 0
+        now_impressions = now["impressions"] if now else 0
+        old_ctr = old["ctr"] if old else 0
+        now_ctr = now["ctr"] if now else 0
+
         lines += [
-            f"<b>{_short_page(page)}</b>",
-            f"Позиция: <b>{a['position']:.1f} → {b['position']:.1f}</b> {mark} ({delta:+.1f})",
-            f"Клики: {a['clicks']:.0f} → {b['clicks']:.0f}",
-            f"Показы: {a['impressions']:.0f} → {b['impressions']:.0f}",
-            f"CTR: {a['ctr']*100:.2f}% → {b['ctr']*100:.2f}%",
+            "",
+            f"👆 Клики: <b>{old_clicks:.0f} → {now_clicks:.0f}</b> ({now_clicks-old_clicks:+.0f})",
+            f"👀 Показы: <b>{old_impressions:.0f} → {now_impressions:.0f}</b> ({now_impressions-old_impressions:+.0f})",
+            f"🎯 CTR: <b>{old_ctr*100:.2f}% → {now_ctr*100:.2f}%</b> ({(now_ctr-old_ctr)*100:+.2f} п.п.)",
             "",
         ]
-    return "\n".join(lines)
+
+        if old and now:
+            position_change = now["position"] - old["position"]
+            impressions_change = now_impressions - old_impressions
+            if position_change >= 1.0:
+                conclusion = "🔴 Основная проблема — страница стала ранжироваться ниже."
+            elif impressions_change < 0 and abs(impressions_change) >= max(10, old_impressions * 0.15):
+                conclusion = "🟡 Показов стало заметно меньше. Проверьте спрос и видимость страницы."
+            elif now_clicks > old_clicks or now_ctr > old_ctr:
+                conclusion = "🟢 Клики или CTR выросли, но продолжайте следить за позицией."
+            else:
+                conclusion = "🟡 Существенного улучшения пока нет."
+            lines += ["🤖 <b>Вывод</b>", conclusion, ""]
+
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
 
 
 async def page_report_text(page: str, days: int = 28) -> str:

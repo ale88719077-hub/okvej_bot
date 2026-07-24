@@ -20,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, WebAppInfo, FSInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton, CopyTextButton, InputMediaPhoto, WebAppInfo, FSInputFile,
 )
 
 from html.parser import HTMLParser
@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "22.0"
-BOT_BUILD = "2026-07-23-seo-free-query-page-growth"
+BOT_VERSION = "22.1"
+BOT_BUILD = "2026-07-24-seo-periods-phone-copy"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -3609,6 +3609,16 @@ def _save_webhook_seen_ids(seen_ids):
         logging.exception("Cannot save order webhook state")
 
 
+def _order_phone(order):
+    customer = _order_value(order, "customer", "user", "client", default={})
+    recipient = _order_value(order, "recipient", "delivery_recipient", default={})
+    return (
+        _order_text(_order_value(recipient, "phone", default=""))
+        or _order_text(_order_value(customer, "phone", "telephone", default=""))
+        or _order_text(_order_value(order, "delivery_phone", "phone", "telephone", "customer_phone", default=""))
+    )
+
+
 def _format_order_notification(order):
     order_number = _order_id(order) or "без номера"
     customer = _order_value(order, "customer", "user", "client", default={})
@@ -3619,11 +3629,7 @@ def _format_order_notification(order):
         or _order_text(_order_value(customer, "name", "title", "full_name", default=""))
         or _order_text(_order_value(order, "delivery_name", "name", "customer_name", "client_name", default=""))
     )
-    phone = (
-        _order_text(_order_value(recipient, "phone", default=""))
-        or _order_text(_order_value(customer, "phone", "telephone", default=""))
-        or _order_text(_order_value(order, "delivery_phone", "phone", "telephone", "customer_phone", default=""))
-    )
+    phone = _order_phone(order)
     email = (
         _order_text(_order_value(customer, "email", default=""))
         or _order_text(_order_value(order, "delivery_email", "email", "customer_email", default=""))
@@ -3701,6 +3707,14 @@ async def _send_order_to_recipients(order):
 
     order_id = _order_id(order)
     rows = []
+    phone = _order_phone(order)
+    if phone:
+        rows.append([
+            InlineKeyboardButton(
+                text="📋 Скопіювати номер телефону",
+                copy_text=CopyTextButton(text=phone),
+            )
+        ])
     if order_id:
         rows.extend([
             [
