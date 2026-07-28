@@ -20,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, CopyTextButton, InputMediaPhoto, WebAppInfo, FSInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, WebAppInfo, FSInputFile,
 )
 
 from html.parser import HTMLParser
@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "22.1"
-BOT_BUILD = "2026-07-24-seo-periods-phone-copy"
+BOT_VERSION = "19.4"
+BOT_BUILD = "2026-07-28-price-3-and-5"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -151,7 +151,10 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🛒 Кошик"),
             KeyboardButton(text="📄 Прайс"),
         ],
-        [KeyboardButton(text="💼 Прайс -5%")],
+        [
+            KeyboardButton(text="💼 Прайс -3%"),
+            KeyboardButton(text="💼 Прайс -5%"),
+        ],
         [KeyboardButton(text="🚚 Доставка й оплата")],
         [
             KeyboardButton(text="💬 Менеджер"),
@@ -165,15 +168,6 @@ main_menu = ReplyKeyboardMarkup(
     is_persistent=True,
 )
 
-# Analytics and SEO are registered directly in bot.py before the rest of the
-# message handlers. This avoids launcher/import-order issues on Railway.
-from analytics_router import add_admin_buttons, router as analytics_seo_router
-from analytics_seo import log_google_config_status
-
-main_menu = add_admin_buttons(main_menu)
-dp.include_router(analytics_seo_router)
-logging.info("SEO Pro router registered directly in bot.py")
-log_google_config_status()
 
 
 def localize(value):
@@ -2269,7 +2263,7 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
 
 async def send_current_price(message: Message, discount_percent: float = 0):
     is_discount = discount_percent > 0
-    loading_text = "⏳ Формую оптовий прайс зі знижкою 5%..." if is_discount else "⏳ Формую актуальний прайс із Хорошопу..."
+    loading_text = f"⏳ Формую оптовий прайс зі знижкою {discount_percent:g}%..." if is_discount else "⏳ Формую актуальний прайс із Хорошопу..."
     loading = await message.answer(loading_text)
     temp_path = None
     try:
@@ -2279,19 +2273,19 @@ async def send_current_price(message: Message, discount_percent: float = 0):
             key=lambda p: (product_brand(p).lower(), category_sort_key(category_name(p)), clean_product_title(localize(p.get("title"))).lower()),
         )
         date_part = datetime.now().strftime('%d-%m-%Y')
-        filename = f"OKVEJ_Wholesale_Price_-5pct_{date_part}.xlsx" if is_discount else f"OKVEJ_Price_{date_part}.xlsx"
+        filename = f"OKVEJ_Wholesale_Price_-{discount_percent:g}pct_{date_part}.xlsx" if is_discount else f"OKVEJ_Price_{date_part}.xlsx"
         temp_dir = tempfile.mkdtemp(prefix="okvej_price_")
         temp_path = str(Path(temp_dir) / filename)
         await asyncio.to_thread(build_price_xlsx, products, temp_path, discount_percent)
 
-        caption_title = "Оптовий прайс OKVEJ зі знижкою 5%" if is_discount else "Актуальний прайс OKVEJ"
+        caption_title = f"Оптовий прайс OKVEJ зі знижкою {discount_percent:g}%" if is_discount else "Актуальний прайс OKVEJ"
         await message.answer_document(
             FSInputFile(temp_path, filename=filename),
             caption=(
                 f"💼 <b>{caption_title}</b>\n" if is_discount else f"📄 <b>{caption_title}</b>\n"
             ) + (
                 f"✅ Товарів у наявності: <b>{len(products)}</b>\n"
-                + ("🏷 Знижка: <b>5%</b>\n" if is_discount else "")
+                + (f"🏷 Знижка: <b>{discount_percent:g}%</b>\n" if is_discount else "")
                 + f"🕒 Оновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
             ),
             parse_mode="HTML",
@@ -2318,6 +2312,11 @@ async def price_command(message: Message):
     await send_current_price(message)
 
 
+@dp.message(Command("price3"))
+async def wholesale_price_3_command(message: Message):
+    await send_current_price(message, discount_percent=3)
+
+
 @dp.message(Command("price5"))
 async def wholesale_price_command(message: Message):
     await send_current_price(message, discount_percent=5)
@@ -2326,6 +2325,11 @@ async def wholesale_price_command(message: Message):
 @dp.message(F.text == "📄 Прайс")
 async def price_button(message: Message):
     await send_current_price(message)
+
+
+@dp.message(F.text == "💼 Прайс -3%")
+async def wholesale_price_3_button(message: Message):
+    await send_current_price(message, discount_percent=3)
 
 
 @dp.message(F.text == "💼 Прайс -5%")
@@ -2368,9 +2372,10 @@ async def commands_handler(message: Message):
         "/myid — показати Telegram ID\n"
         "/analytics — аналітика за весь час\n"
         "/analytics_today — аналітика за сьогодні\n"
-        "/analytics_reset — очистити внутрішню аналітику\n"
-        "/seo — дані Google Search Console\n"
-        "/panel — SEO-панель\n"
+        "/analytics_reset — очистити аналітику\n"
+        "/price — актуальний прайс\n"
+        "/price3 — оптовий прайс зі знижкою 3%\n"
+        "/price5 — оптовий прайс зі знижкою 5%\n"
         "/commands — список швидких команд",
         parse_mode="HTML",
         reply_markup=main_menu,
@@ -3609,16 +3614,6 @@ def _save_webhook_seen_ids(seen_ids):
         logging.exception("Cannot save order webhook state")
 
 
-def _order_phone(order):
-    customer = _order_value(order, "customer", "user", "client", default={})
-    recipient = _order_value(order, "recipient", "delivery_recipient", default={})
-    return (
-        _order_text(_order_value(recipient, "phone", default=""))
-        or _order_text(_order_value(customer, "phone", "telephone", default=""))
-        or _order_text(_order_value(order, "delivery_phone", "phone", "telephone", "customer_phone", default=""))
-    )
-
-
 def _format_order_notification(order):
     order_number = _order_id(order) or "без номера"
     customer = _order_value(order, "customer", "user", "client", default={})
@@ -3629,7 +3624,11 @@ def _format_order_notification(order):
         or _order_text(_order_value(customer, "name", "title", "full_name", default=""))
         or _order_text(_order_value(order, "delivery_name", "name", "customer_name", "client_name", default=""))
     )
-    phone = _order_phone(order)
+    phone = (
+        _order_text(_order_value(recipient, "phone", default=""))
+        or _order_text(_order_value(customer, "phone", "telephone", default=""))
+        or _order_text(_order_value(order, "delivery_phone", "phone", "telephone", "customer_phone", default=""))
+    )
     email = (
         _order_text(_order_value(customer, "email", default=""))
         or _order_text(_order_value(order, "delivery_email", "email", "customer_email", default=""))
@@ -3707,14 +3706,6 @@ async def _send_order_to_recipients(order):
 
     order_id = _order_id(order)
     rows = []
-    phone = _order_phone(order)
-    if phone:
-        rows.append([
-            InlineKeyboardButton(
-                text="📋 Скопіювати номер телефону",
-                copy_text=CopyTextButton(text=phone),
-            )
-        ])
     if order_id:
         rows.extend([
             [
