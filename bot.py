@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "19.4"
-BOT_BUILD = "2026-07-28-price-3-and-5"
+BOT_VERSION = "19.5"
+BOT_BUILD = "2026-07-29-hide-discount-price-buttons"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -150,10 +150,6 @@ main_menu = ReplyKeyboardMarkup(
         [
             KeyboardButton(text="🛒 Кошик"),
             KeyboardButton(text="📄 Прайс"),
-        ],
-        [
-            KeyboardButton(text="💼 Прайс -3%"),
-            KeyboardButton(text="💼 Прайс -5%"),
         ],
         [KeyboardButton(text="🚚 Доставка й оплата")],
         [
@@ -2097,10 +2093,6 @@ async def manual_post_publish(message: Message, state: FSMContext):
                     text="💬 Менеджер",
                     url=f"https://t.me/{MANAGER_USERNAME}",
                 )],
-                [InlineKeyboardButton(
-                    text="🤖 Відкрити бота",
-                    url=BOT_URL,
-                )],
             ]
         )
 
@@ -2325,16 +2317,6 @@ async def wholesale_price_command(message: Message):
 @dp.message(F.text == "📄 Прайс")
 async def price_button(message: Message):
     await send_current_price(message)
-
-
-@dp.message(F.text == "💼 Прайс -3%")
-async def wholesale_price_3_button(message: Message):
-    await send_current_price(message, discount_percent=3)
-
-
-@dp.message(F.text == "💼 Прайс -5%")
-async def wholesale_price_button(message: Message):
-    await send_current_price(message, discount_percent=5)
 
 
 @dp.message(Command("analytics"))
