@@ -28,8 +28,8 @@ from aiohttp import web
 
 from horoshop_api import HoroshopAPI
 
-BOT_VERSION = "19.6"
-BOT_BUILD = "2026-07-29-restore-copy-phone-button"
+BOT_VERSION = "23.0"
+BOT_BUILD = "2026-08-06-sales"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -51,6 +51,12 @@ ADMIN_DATA_PATH = Path(
 )
 if not ADMIN_DATA_PATH.parent.exists():
     ADMIN_DATA_PATH = Path("admin_data.json")
+
+SALES_DATA_PATH = Path(
+    os.getenv("SALES_DATA_PATH", "/data/sales.json")
+)
+if not SALES_DATA_PATH.parent.exists():
+    SALES_DATA_PATH = Path("sales.json")
 
 ANALYTICS_DATA_PATH = Path(
     os.getenv("ANALYTICS_DATA_PATH", "/data/analytics_data.json")
@@ -144,11 +150,14 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🔥 Хіти"),
         ],
         [
+            KeyboardButton(text="🏷️ Акції"),
             KeyboardButton(text="❤️ Обране"),
-            KeyboardButton(text="🕒 Переглянуті"),
         ],
         [
             KeyboardButton(text="🛒 Кошик"),
+            KeyboardButton(text="🕒 Переглянуті"),
+        ],
+        [
             KeyboardButton(text="📄 Прайс"),
         ],
         [KeyboardButton(text="🚚 Доставка й оплата")],
@@ -234,6 +243,57 @@ def save_admin_data():
 
 admin_data = load_admin_data()
 
+
+def load_sales():
+    try:
+        if SALES_DATA_PATH.exists():
+            saved = json.loads(SALES_DATA_PATH.read_text(encoding="utf-8"))
+            if isinstance(saved, list):
+                return [
+                    str(value).strip()
+                    for value in saved
+                    if str(value).strip()
+                ]
+    except Exception:
+        logging.exception("Failed to load sales.json")
+    return []
+
+
+def save_sales():
+    try:
+        SALES_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SALES_DATA_PATH.write_text(
+            json.dumps(sorted(sales), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        logging.exception("Failed to save sales.json")
+        return False
+
+
+sales = set(load_sales())
+
+
+def is_sale(product_id):
+    return str(product_id or "").strip() in sales
+
+
+def add_sale(product_id):
+    product_id = str(product_id or "").strip()
+    if not product_id:
+        return False
+    sales.add(product_id)
+    return save_sales()
+
+
+def remove_sale(product_id):
+    product_id = str(product_id or "").strip()
+    if not product_id:
+        return False
+    sales.discard(product_id)
+    return save_sales()
+
 def default_analytics_data():
     return {"started_at": datetime.now(timezone.utc).isoformat(), "users": [], "events": {}, "products": {}, "searches": {}, "daily": {}}
 
@@ -315,6 +375,8 @@ def product_article(product):
 
 
 def section_articles(section):
+    if section == "sales":
+        return set(sales)
     return set(admin_data.get(section, []))
 
 
@@ -327,6 +389,9 @@ def set_product_section(product, section, enabled):
     article = product_article(product)
     if not article:
         return False
+
+    if section == "sales":
+        return add_sale(article) if enabled else remove_sale(article)
 
     values = section_articles(section)
     if enabled:
@@ -345,9 +410,10 @@ def products_from_section(products, section):
         if product_article(product)
     }
 
+    articles = sorted(sales) if section == "sales" else admin_data.get(section, [])
     return [
         by_article[article]
-        for article in admin_data.get(section, [])
+        for article in articles
         if article in by_article and is_in_stock(by_article[article])
     ]
 
@@ -369,6 +435,19 @@ def admin_section_buttons(product, user_id):
             callback_data=(
                 f"admin_section:new_products:"
                 f"{'remove' if product_in_section(product, 'new_products') else 'add'}:{key}"
+            ),
+        )
+    ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text=(
+                "❌ Прибрати з акцій"
+                if product_in_section(product, "sales")
+                else "🏷️ Додати в акції"
+            ),
+            callback_data=(
+                f"sale_{'remove' if product_in_section(product, 'sales') else 'add'}_{key}"
             ),
         )
     ])
@@ -415,7 +494,8 @@ def admin_section_keyboard(products, section, page=0):
     page_items = products[start:start + ADMIN_SECTION_PAGE_SIZE]
 
     rows = []
-    icon = "🆕" if section == "new_products" else "🔥"
+    icons = {"new_products": "🆕", "hits": "🔥", "sales": "🏷️"}
+    icon = icons.get(section, "⭐")
 
     for product in page_items:
         key = product_key(product)
@@ -1030,6 +1110,8 @@ CATALOG_GRID_PAGE_SIZE = 3
 def product_badge_prefix(product):
     article = product_article(product)
     labels = []
+    if article and article in section_articles("sales"):
+        labels.append("🏷️")
     if article and article in section_articles("hits"):
         labels.append("🔥")
     if article and article in section_articles("new_products"):
@@ -1150,6 +1232,9 @@ async def send_catalog_grid(
         image_url = get_image_url(product)
 
         caption = []
+
+        if article and article in section_articles("sales"):
+            caption.append("🏷️ <b>АКЦІЯ</b>")
 
         if article and article in section_articles("hits"):
             caption.append("🔥 <b>ХІТ ПРОДАЖУ</b>")
@@ -1548,6 +1633,9 @@ def product_text(product):
     description = clean_product_description(description)
 
     badges = []
+
+    if article and article in section_articles("sales"):
+        badges.append("🏷️ <b>АКЦІЯ</b>")
 
     if article and article in section_articles("hits"):
         badges.append("🔥 <b>ХІТ ПРОДАЖУ</b> 🔥")
@@ -2045,6 +2133,9 @@ async def manual_post_publish(message: Message, state: FSMContext):
             price_line = f"💰 Ціна: <b>{price:g} грн</b>\n\n"
 
             article = product_article(product)
+
+            if article and article in section_articles("sales"):
+                badges.append("🏷️ <b>АКЦІЯ</b>")
 
             if article and article in section_articles("hits"):
                 badges.append("🔥 <b>ХІТ ПРОДАЖУ</b> 🔥")
@@ -3179,7 +3270,12 @@ async def recent_product(callback: CallbackQuery):
 async def show_manual_section(message: Message, section: str):
     products = await get_in_stock_products()
     items = products_from_section(products, section)
-    title = "🆕 Новинки OKVEJ" if section == "new_products" else "🔥 Хіти OKVEJ"
+    titles = {
+        "new_products": "🆕 Новинки OKVEJ",
+        "hits": "🔥 Хіти OKVEJ",
+        "sales": "🏷️ Акції OKVEJ",
+    }
+    title = titles.get(section, "🍬 Добірка OKVEJ")
 
     if not items:
         await message.answer(
@@ -3204,6 +3300,11 @@ async def new_products_menu(message: Message):
 @dp.message(F.text == "🔥 Хіти")
 async def hits_menu(message: Message):
     await show_manual_section(message, "hits")
+
+
+@dp.message(F.text == "🏷️ Акції")
+async def sales_menu(message: Message):
+    await show_manual_section(message, "sales")
 
 
 @dp.callback_query(F.data.startswith("admin_section_page:"))
@@ -3234,7 +3335,12 @@ async def admin_product_card(callback: CallbackQuery):
         await callback.answer("Товар не знайдено.", show_alert=True)
         return
 
-    back_title = "новинок" if section == "new_products" else "хітів"
+    back_titles = {
+        "new_products": "новинок",
+        "hits": "хітів",
+        "sales": "акцій",
+    }
+    back_title = back_titles.get(section, "добірки")
     keyboard = card_keyboard(
         product,
         callback.from_user.id,
@@ -3262,6 +3368,39 @@ async def admin_product_card(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data.regexp(r"^sale_(add|remove)_[0-9a-f]{14}$"))
+async def sale_toggle(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Немає доступу.", show_alert=True)
+        return
+
+    _, action, key = callback.data.split("_", 2)
+    product = product_cache.get(key)
+    if not product:
+        products = await get_in_stock_products()
+        product = next(
+            (item for item in products if product_key(item) == key),
+            None,
+        )
+
+    if not product:
+        await callback.answer("Товар не знайдено.", show_alert=True)
+        return
+
+    enabled = action == "add"
+    if not set_product_section(product, "sales", enabled):
+        await callback.answer("Не вдалося зберегти.", show_alert=True)
+        return
+
+    await callback.answer(
+        f"Товар {'додано в' if enabled else 'прибрано з'} акції.",
+        show_alert=True,
+    )
+    await callback.message.edit_reply_markup(
+        reply_markup=card_keyboard(product, callback.from_user.id),
+    )
+
+
 @dp.callback_query(F.data.startswith("admin_section:"))
 async def admin_section_toggle(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3269,7 +3408,7 @@ async def admin_section_toggle(callback: CallbackQuery):
         return
 
     _, section, action, key = callback.data.split(":", 3)
-    if section not in {"new_products", "hits", "recommended"}:
+    if section not in {"new_products", "hits", "sales", "recommended"}:
         await callback.answer("Невідомий розділ.", show_alert=True)
         return
 
@@ -3293,6 +3432,7 @@ async def admin_section_toggle(callback: CallbackQuery):
     names = {
         "new_products": "новинки",
         "hits": "хіти",
+        "sales": "акції",
         "recommended": "рекомендовані",
     }
     await callback.answer(
@@ -3315,6 +3455,7 @@ async def admin_status(message: Message):
         "⚙️ <b>Адмін-панель OKVEJ</b>\n\n"
         f"Новинок: <b>{len(admin_data['new_products'])}</b>\n"
         f"Хітів: <b>{len(admin_data['hits'])}</b>\n"
+        f"Акцій: <b>{len(sales)}</b>\n"
         f"Рекомендованих: <b>{len(admin_data['recommended'])}</b>\n\n"
         "Відкрийте картку товару, щоб додати або прибрати його.",
         parse_mode="HTML",
