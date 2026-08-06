@@ -38,6 +38,7 @@ if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
 SITE_URL = "https://okvej.com.ua/"
+INSTAGRAM_URL = "https://www.instagram.com/okvej.com.ua/"
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@okvej")
 BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
@@ -165,6 +166,7 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="💬 Менеджер"),
             KeyboardButton(text="📢 Канал OKVEJ"),
         ],
+        [KeyboardButton(text="📸 Instagram")],
         [
             KeyboardButton(text="🛍 Відкрити магазин", web_app=WebAppInfo(url=MINI_APP_URL)) if MINI_APP_URL else KeyboardButton(text="🛍 Відкрити магазин"),
         ],
@@ -3473,6 +3475,11 @@ async def show_cart(message: Message):
 @dp.message(F.text == "🌐 Сайт")
 async def site(message: Message):
     await message.answer(SITE_URL)
+
+
+@dp.message(F.text == "📸 Instagram")
+async def instagram(message: Message):
+    await message.answer(INSTAGRAM_URL)
 
 
 @dp.message(F.text == "💬 Менеджер")
