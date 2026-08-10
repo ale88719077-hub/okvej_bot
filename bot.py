@@ -38,7 +38,6 @@ if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
 SITE_URL = "https://okvej.com.ua/"
-INSTAGRAM_URL = "https://www.instagram.com/okvej.com.ua/"
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@okvej")
 BOT_URL = "https://t.me/okvej_shop_bot"
 MANAGER_USERNAME = os.getenv("MANAGER_USERNAME", "sv000svbdd").lstrip("@")
@@ -166,7 +165,6 @@ main_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="💬 Менеджер"),
             KeyboardButton(text="📢 Канал OKVEJ"),
         ],
-        [KeyboardButton(text="📸 Instagram")],
         [
             KeyboardButton(text="🛍 Відкрити магазин", web_app=WebAppInfo(url=MINI_APP_URL)) if MINI_APP_URL else KeyboardButton(text="🛍 Відкрити магазин"),
         ],
@@ -3477,11 +3475,6 @@ async def site(message: Message):
     await message.answer(SITE_URL)
 
 
-@dp.message(F.text == "📸 Instagram")
-async def instagram(message: Message):
-    await message.answer(INSTAGRAM_URL)
-
-
 @dp.message(F.text == "💬 Менеджер")
 async def manager(message: Message):
     await message.answer(f"https://t.me/{MANAGER_USERNAME}")
@@ -3639,7 +3632,7 @@ async def open_mini_app_fallback(message: Message):
 
 ORDER_WEBHOOK_SECRET = (os.getenv("HOROSHOP_ORDER_WEBHOOK_SECRET") or "").strip()
 ORDER_WEBHOOK_STATE_PATH = Path(
-    os.getenv("ORDER_STATE_FILE", "/data/order_webhook_state.json")
+    os.getenv("ORDER_WEBHOOK_STATE_FILE", "/data/order_webhook_state.json")
 )
 if not ORDER_WEBHOOK_STATE_PATH.parent.exists():
     ORDER_WEBHOOK_STATE_PATH = Path("order_webhook_state.json")
@@ -3940,7 +3933,10 @@ async def horoshop_order_webhook(request):
 # ПРЯМА ПЕРЕВІРКА НОВИХ ЗАМОВЛЕНЬ ЧЕРЕЗ ХОРОШОП API orders/get
 # =============================================================
 ORDER_API_POLL_SECONDS = max(20, int(os.getenv("ORDER_POLL_SECONDS", "45")))
-ORDER_API_STATE_PATH = Path(os.getenv("ORDER_STATE_FILE", "/data/order_api_state.json"))
+ORDER_API_LOOKBACK_DAYS = max(2, int(os.getenv("ORDER_LOOKBACK_DAYS", "7")))
+ORDER_API_BOOTSTRAP_MAX = max(1, int(os.getenv("ORDER_BOOTSTRAP_MAX_ORDERS", "1")))
+ORDER_API_STATE_VERSION = 2
+ORDER_API_STATE_PATH = Path(os.getenv("ORDER_API_STATE_FILE", "/data/order_api_state.json"))
 if not ORDER_API_STATE_PATH.parent.exists():
     ORDER_API_STATE_PATH = Path("order_api_state.json")
 
@@ -3950,7 +3946,10 @@ def _load_order_api_state():
         if ORDER_API_STATE_PATH.exists():
             data = json.loads(ORDER_API_STATE_PATH.read_text("utf-8"))
             return {
-                "initialized": bool(data.get("initialized", False)),
+                "initialized": (
+                    data.get("version") == ORDER_API_STATE_VERSION
+                    and bool(data.get("initialized", False))
+                ),
                 "seen": {str(x) for x in data.get("seen_order_ids", [])},
             }
     except Exception:
@@ -3963,6 +3962,7 @@ def _save_order_api_state(state):
         ORDER_API_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = ORDER_API_STATE_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps({
+            "version": ORDER_API_STATE_VERSION,
             "initialized": bool(state.get("initialized")),
             "seen_order_ids": list(state.get("seen", set()))[-3000:],
         }, ensure_ascii=False, indent=2), "utf-8")
@@ -3972,8 +3972,10 @@ def _save_order_api_state(state):
 
 
 async def check_horoshop_orders_once(state):
-    # Берём небольшой запас по времени, а дубли исключаем по order_id.
-    date_from = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    # Берём запас по времени, а дубли исключаем по ID заказа.
+    date_from = (
+        datetime.now() - timedelta(days=ORDER_API_LOOKBACK_DAYS)
+    ).strftime("%Y-%m-%d %H:%M:%S")
     orders = await shop.get_orders(
         date_from=date_from,
         limit=100,
@@ -3982,20 +3984,38 @@ async def check_horoshop_orders_once(state):
     )
     orders = sorted(
         [order for order in orders if isinstance(order, dict)],
-        key=lambda x: (str(x.get("stat_created", "")), int(x.get("order_id", 0) or 0)),
+        key=lambda x: (str(x.get("stat_created", "")), _order_id(x)),
     )
 
-    current_ids = {str(order.get("order_id")) for order in orders if order.get("order_id") is not None}
+    current_ids = {_order_id(order) for order in orders if _order_id(order)}
     if not state["initialized"]:
+        # Раньше первый запуск молча отмечал все найденные заказы как старые.
+        # Поэтому заказ, созданный во время перезапуска Railway, терялся.
+        # На чистом состоянии отправляем только последние заказы (по умолчанию
+        # один), затем запоминаем весь текущий список без массовых дублей.
+        bootstrap_orders = orders[-ORDER_API_BOOTSTRAP_MAX:]
+        for order in bootstrap_orders:
+            delivered = await _send_order_to_recipients(order)
+            if not delivered:
+                raise RuntimeError("Horoshop bootstrap order was not delivered")
+            logging.info(
+                "Bootstrap Horoshop order %s sent to %s chats",
+                _order_id(order) or "unknown",
+                delivered,
+            )
         state["seen"].update(current_ids)
         state["initialized"] = True
         _save_order_api_state(state)
-        logging.info("Horoshop orders initialized with %s existing orders", len(current_ids))
+        logging.info(
+            "Horoshop orders initialized with %s existing orders; restored %s latest",
+            len(current_ids),
+            len(bootstrap_orders),
+        )
         return
 
     changed = False
     for order in orders:
-        order_id = str(order.get("order_id", "")).strip()
+        order_id = _order_id(order)
         if not order_id or order_id in state["seen"]:
             continue
         delivered = await _send_order_to_recipients(order)
