@@ -1442,6 +1442,7 @@ class ProductPageParser(HTMLParser):
         super().__init__()
         self.meta = {}
         self.json_ld_parts = []
+        self.text_parts = []
         self._inside_json_ld = False
 
     def handle_starttag(self, tag, attrs):
@@ -1470,6 +1471,8 @@ class ProductPageParser(HTMLParser):
     def handle_data(self, data):
         if self._inside_json_ld:
             self.json_ld_parts.append(data)
+        elif str(data).strip():
+            self.text_parts.append(str(data).strip())
 
 
 def clean_page_title(title):
@@ -1579,6 +1582,60 @@ async def load_product_from_page(link):
         "image_url": image_url,
         "link": final_link,
     }
+
+
+def wholesale_prices_from_text(text):
+    """Повертає рівні (кількість, ціна) з видимого тексту картки товару."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).replace("\xa0", " ")
+    patterns = (
+        r"([0-9][0-9 ]*(?:[.,][0-9]{1,2})?)\s*грн\.?\s*(?:від|от)\s*(\d+)\s*(?:одиниц(?:ь|і)?|единиц(?:а|ы)?)",
+        r"(?:від|от)\s*(\d+)\s*(?:одиниц(?:ь|і)?|единиц(?:а|ы)?)[^0-9]{0,30}([0-9][0-9 ]*(?:[.,][0-9]{1,2})?)\s*грн\.?",
+    )
+    levels = set()
+    for pattern_index, pattern in enumerate(patterns):
+        for match in re.finditer(pattern, normalized, flags=re.IGNORECASE):
+            first, second = match.groups()
+            quantity_raw, price_raw = (second, first) if pattern_index == 0 else (first, second)
+            try:
+                quantity = int(quantity_raw)
+                price = float(price_raw.replace(" ", "").replace(",", "."))
+            except (TypeError, ValueError):
+                continue
+            if quantity > 0 and price > 0:
+                levels.add((quantity, price))
+    return sorted(levels)
+
+
+async def load_wholesale_prices(link, session):
+    if not link:
+        return []
+    try:
+        async with session.get(link, allow_redirects=True) as response:
+            if response.status >= 400:
+                return []
+            html = await response.text()
+        parser = ProductPageParser()
+        parser.feed(html)
+        return wholesale_prices_from_text(" ".join(parser.text_parts))
+    except Exception:
+        logging.debug("Не вдалося прочитати оптові ціни: %s", link, exc_info=True)
+        return []
+
+
+async def enrich_products_with_wholesale_prices(products):
+    """Додає рівні оптової ціни, показані на публічних картках товарів."""
+    timeout = aiohttp.ClientTimeout(total=20)
+    headers = {"User-Agent": "Mozilla/5.0 OKVEJ-Price-Bot/1.0"}
+    semaphore = asyncio.Semaphore(12)
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async def enrich(product):
+            async with semaphore:
+                product["wholesale_prices"] = await load_wholesale_prices(
+                    product_link(product), session
+                )
+
+        await asyncio.gather(*(enrich(product) for product in products))
+    return products
 
 
 def clean_product_title(value):
@@ -2280,7 +2337,7 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
     })
 
     title = f"OKVEJ — оптовий прайс зі знижкою {discount_percent:g}%" if is_discount else "OKVEJ — актуальний прайс"
-    end_col = 8 if is_discount else 7
+    end_col = 10 if is_discount else 9
     worksheet.merge_range(0, 0, 0, end_col, title, title_format)
     generated = datetime.now().strftime("%d.%m.%Y %H:%M")
     worksheet.write("A2", f"Оновлено: {generated}", info_format)
@@ -2288,7 +2345,10 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
     if is_discount:
         worksheet.write("G2", f"Знижка: {discount_percent:g}%", info_format)
 
-    headers = ["№", "Бренд", "Категорія", "Назва товару", "Артикул", "Ціна сайту"]
+    headers = [
+        "№", "Бренд", "Категорія", "Назва товару", "Артикул", "Ціна сайту",
+        "Оптова ціна за од.", "Замовлення від, од.",
+    ]
     if is_discount:
         headers.append(f"Ціна -{discount_percent:g}%")
     headers.extend(["Наявність", "Посилання"])
@@ -2313,7 +2373,15 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
         worksheet.write(row, 3, title, text_format)
         worksheet.write(row, 4, article, center_format)
         worksheet.write_number(row, 5, price, price_format)
-        next_col = 6
+        wholesale_levels = product.get("wholesale_prices") or []
+        if wholesale_levels:
+            wholesale_quantity, wholesale_price = wholesale_levels[0]
+            worksheet.write_number(row, 6, wholesale_price, discount_price_format)
+            worksheet.write_number(row, 7, wholesale_quantity, center_format)
+        else:
+            worksheet.write_blank(row, 6, None, price_format)
+            worksheet.write_blank(row, 7, None, center_format)
+        next_col = 8
         if is_discount:
             discounted_price = round(price * discount_factor, 2)
             worksheet.write_number(row, next_col, discounted_price, discount_price_format)
@@ -2331,13 +2399,14 @@ def build_price_xlsx(products, output_path: str, discount_percent: float = 0):
     worksheet.set_column("C:C", 22)
     worksheet.set_column("D:D", 48)
     worksheet.set_column("E:E", 16)
-    worksheet.set_column("F:G", 16)
+    worksheet.set_column("F:G", 18)
+    worksheet.set_column("H:H", 18)
     if is_discount:
-        worksheet.set_column("H:H", 16)
-        worksheet.set_column("I:I", 14)
+        worksheet.set_column("I:J", 16)
+        worksheet.set_column("K:K", 14)
     else:
-        worksheet.set_column("G:G", 16)
-        worksheet.set_column("H:H", 14)
+        worksheet.set_column("I:I", 16)
+        worksheet.set_column("J:J", 14)
     worksheet.set_landscape()
     worksheet.fit_to_pages(1, 0)
     worksheet.set_margins(0.25, 0.25, 0.5, 0.5)
@@ -2351,6 +2420,8 @@ async def send_current_price(message: Message, discount_percent: float = 0):
     temp_path = None
     try:
         products = await get_in_stock_products(force_refresh=True)
+        await loading.edit_text("⏳ Додаю оптові ціни за одиницю з карток товарів...")
+        await enrich_products_with_wholesale_prices(products)
         products = sorted(
             products,
             key=lambda p: (product_brand(p).lower(), category_sort_key(category_name(p)), clean_product_title(localize(p.get("title"))).lower()),
