@@ -1606,39 +1606,49 @@ def wholesale_prices_from_text(text):
     return sorted(levels)
 
 
+def apply_site_challenge_cookie(html, response_url, session):
+    challenge = re.search(
+        r'defaultHash\s*=\s*["\']([a-f0-9]{32,128})["\']',
+        html,
+        flags=re.IGNORECASE,
+    )
+    if not challenge:
+        return False
+    session.cookie_jar.update_cookies(
+        {"challenge_passed": challenge.group(1)},
+        response_url=response_url,
+    )
+    return True
+
+
 async def load_wholesale_prices(link, session):
     if not link:
         return []
     try:
-        async with session.get(link, allow_redirects=True) as response:
-            if response.status >= 400:
-                return []
-            html = await response.text()
-
-        # Захист сайту при першому запиті повертає короткий JS challenge,
-        # який у браузері встановлює cookie та перезавантажує сторінку.
-        # aiohttp JavaScript не виконує, тому відтворюємо тільки безпечну
-        # частину перевірки — беремо значення cookie з відповіді й повторюємо GET.
-        challenge = re.search(
-            r'defaultHash\s*=\s*["\']([a-f0-9]{32,128})["\']',
-            html,
-            flags=re.IGNORECASE,
-        )
-        if challenge:
-            session.cookie_jar.update_cookies(
-                {"challenge_passed": challenge.group(1)},
-                response_url=response.url,
-            )
+        for attempt in range(3):
             async with session.get(link, allow_redirects=True) as response:
-                if response.status >= 400:
-                    return []
                 html = await response.text()
+                response_url = response.url
+                status = response.status
 
-        parser = ProductPageParser()
-        parser.feed(html)
-        return wholesale_prices_from_text(" ".join(parser.text_parts))
+            if apply_site_challenge_cookie(html, response_url, session):
+                continue
+            if status in (429, 502, 503, 504):
+                await asyncio.sleep(1 + attempt)
+                continue
+            if status >= 400:
+                logging.warning("Картка товару повернула HTTP %s: %s", status, link)
+                return []
+
+            parser = ProductPageParser()
+            parser.feed(html)
+            levels = wholesale_prices_from_text(" ".join(parser.text_parts))
+            return levels
+
+        logging.warning("Не вдалося пройти захист картки товару: %s", link)
+        return []
     except Exception:
-        logging.debug("Не вдалося прочитати оптові ціни: %s", link, exc_info=True)
+        logging.warning("Не вдалося прочитати оптові ціни: %s", link, exc_info=True)
         return []
 
 
@@ -1646,8 +1656,27 @@ async def enrich_products_with_wholesale_prices(products):
     """Додає рівні оптової ціни, показані на публічних картках товарів."""
     timeout = aiohttp.ClientTimeout(total=20)
     headers = {"User-Agent": "Mozilla/5.0 OKVEJ-Price-Bot/1.0"}
-    semaphore = asyncio.Semaphore(12)
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+    connector = aiohttp.TCPConnector(limit=8)
+    semaphore = asyncio.Semaphore(8)
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        headers=headers,
+        connector=connector,
+        cookie_jar=aiohttp.CookieJar(),
+    ) as session:
+        # Спочатку проходимо cookie-захист одним запитом. Лише після цього
+        # запускаємо паралельне читання всіх карток.
+        first_link = next((product_link(p) for p in products if product_link(p)), None)
+        if first_link:
+            try:
+                async with session.get(first_link, allow_redirects=True) as response:
+                    bootstrap_html = await response.text()
+                    apply_site_challenge_cookie(
+                        bootstrap_html, response.url, session
+                    )
+            except Exception:
+                logging.warning("Не вдалося підготувати cookie сайту", exc_info=True)
+
         async def enrich(product):
             async with semaphore:
                 product["wholesale_prices"] = await load_wholesale_prices(
@@ -1655,6 +1684,8 @@ async def enrich_products_with_wholesale_prices(products):
                 )
 
         await asyncio.gather(*(enrich(product) for product in products))
+    found_count = sum(bool(product.get("wholesale_prices")) for product in products)
+    logging.info("Оптові ціни знайдено для %s з %s товарів", found_count, len(products))
     return products
 
 
@@ -2442,6 +2473,7 @@ async def send_current_price(message: Message, discount_percent: float = 0):
         products = await get_in_stock_products(force_refresh=True)
         await loading.edit_text("⏳ Додаю оптові ціни за одиницю з карток товарів...")
         await enrich_products_with_wholesale_prices(products)
+        wholesale_count = sum(bool(product.get("wholesale_prices")) for product in products)
         products = sorted(
             products,
             key=lambda p: (product_brand(p).lower(), category_sort_key(category_name(p)), clean_product_title(localize(p.get("title"))).lower()),
@@ -2459,6 +2491,7 @@ async def send_current_price(message: Message, discount_percent: float = 0):
                 f"💼 <b>{caption_title}</b>\n" if is_discount else f"📄 <b>{caption_title}</b>\n"
             ) + (
                 f"✅ Товарів у наявності: <b>{len(products)}</b>\n"
+                + f"💰 Оптові ціни знайдено: <b>{wholesale_count}</b>\n"
                 + (f"🏷 Знижка: <b>{discount_percent:g}%</b>\n" if is_discount else "")
                 + f"🕒 Оновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
             ),
