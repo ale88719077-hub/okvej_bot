@@ -1614,6 +1614,26 @@ async def load_wholesale_prices(link, session):
             if response.status >= 400:
                 return []
             html = await response.text()
+
+        # Захист сайту при першому запиті повертає короткий JS challenge,
+        # який у браузері встановлює cookie та перезавантажує сторінку.
+        # aiohttp JavaScript не виконує, тому відтворюємо тільки безпечну
+        # частину перевірки — беремо значення cookie з відповіді й повторюємо GET.
+        challenge = re.search(
+            r'defaultHash\s*=\s*["\']([a-f0-9]{32,128})["\']',
+            html,
+            flags=re.IGNORECASE,
+        )
+        if challenge:
+            session.cookie_jar.update_cookies(
+                {"challenge_passed": challenge.group(1)},
+                response_url=response.url,
+            )
+            async with session.get(link, allow_redirects=True) as response:
+                if response.status >= 400:
+                    return []
+                html = await response.text()
+
         parser = ProductPageParser()
         parser.feed(html)
         return wholesale_prices_from_text(" ".join(parser.text_parts))
