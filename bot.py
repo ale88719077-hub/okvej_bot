@@ -1720,11 +1720,64 @@ def clean_product_description(value):
 
 
 def product_weight(product):
-    for key in ("weight", "packing", "packaging", "unit", "measure"):
-        value = localize(product.get(key)).strip()
-        if value:
-            return value
-    return ""
+    weight_keys = {
+        "weight", "packing", "packaging", "unit", "measure",
+        "box weight", "package weight", "weight box", "weight package",
+        "вага", "вага ящика", "вага коробки", "фасування",
+        "вес", "вес ящика", "вес коробки", "фасовка",
+    }
+    weight_words = ("weight", "вага", "вес", "фасув", "фасов")
+    value_pattern = re.compile(
+        r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(кг|kg|г|гр|g)(?![a-zа-яіїєґ])",
+        re.IGNORECASE,
+    )
+
+    def scalar_text(value):
+        if isinstance(value, dict):
+            value = localize(value)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            return str(value).strip()
+        return ""
+
+    def normalized_weight(value):
+        match = value_pattern.search(scalar_text(value))
+        if not match:
+            return ""
+        number = match.group(1).replace(".", ",")
+        unit = "кг" if match.group(2).lower() in ("кг", "kg") else "г"
+        return f"{number} {unit}"
+
+    def find_weight(value, hinted=False):
+        if isinstance(value, dict):
+            label = " ".join(
+                scalar_text(value.get(key))
+                for key in ("name", "title", "label", "key", "param")
+            ).lower()
+            has_weight_label = hinted or any(word in label for word in weight_words)
+            if has_weight_label:
+                for key in ("value", "selected", "text", "values", "options"):
+                    result = find_weight(value.get(key), True)
+                    if result:
+                        return result
+
+            for key, child in value.items():
+                normalized_key = str(key).strip().lower().replace("_", " ").replace("-", " ")
+                child_hinted = has_weight_label or normalized_key in weight_keys or any(
+                    word in normalized_key for word in weight_words
+                )
+                result = find_weight(child, child_hinted)
+                if result:
+                    return result
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                result = find_weight(child, hinted)
+                if result:
+                    return result
+        elif hinted:
+            return normalized_weight(value)
+        return ""
+
+    return find_weight(product) or normalized_weight(localize(product.get("title")))
 
 
 def product_text(product):
@@ -3638,7 +3691,7 @@ function cats(){const c={};state.products.forEach(p=>c[p.category||'Інші т�
 function iconFor(x){const s=(x||'').toLowerCase();if(s.includes('подар'))return'🎁';if(s.includes('печ'))return'🍪';if(s.includes('шокол'))return'🍫';if(s.includes('карам'))return'🍭';if(s.includes('ваф'))return'🧇';if(s.includes('батонч'))return'🍫';if(s.includes('цук'))return'🍬';return'📦'}
 function isGift(p){const s=`${p.category||''} ${p.title||''}`.toLowerCase();return s.includes('подарун')||s.includes('набір')||s.includes('набор')}
 function filtered(){let a=[...state.products];if(state.mode==='favorites')a=a.filter(p=>state.favorites.has(p.id));if(state.category!=='Усі')a=a.filter(p=>(p.category||'Інші товари')===state.category);const q=state.query.trim().toLowerCase();if(q)a=a.filter(p=>`${p.title} ${p.article||''} ${p.category||''}`.toLowerCase().includes(q));return a}
-function card(p){return `<article class="product-card" data-card="${p.id}"><div class="photo"><img src="${esc(p.image||'')}" alt="${esc(p.title)}"><button class="heart" data-fav="${p.id}">${state.favorites.has(p.id)?'❤️':'🤍'}</button><span class="stock">● В наявності</span></div><div class="product-info"><div class="tags"><span class="tag hot">🔥 Вигідно</span><span class="tag">OKVEJ</span></div><h3 class="product-title">${esc(p.title)}</h3><div class="meta">${esc(p.category||'Товар')}</div><div class="price">${money(p.price)}</div><div class="actions"><button class="details" data-details="${p.id}">ℹ️</button><button class="add" data-add="${p.id}">🛒 У кошик</button></div></div></article>`}
+function card(p){return `<article class="product-card" data-card="${p.id}"><div class="photo"><img src="${esc(p.image||'')}" alt="${esc(p.title)}"><button class="heart" data-fav="${p.id}">${state.favorites.has(p.id)?'❤️':'🤍'}</button><span class="stock">● В наявності</span></div><div class="product-info"><div class="tags"><span class="tag hot">🔥 Вигідно</span><span class="tag">OKVEJ</span></div><h3 class="product-title">${esc(p.title)}</h3><div class="meta">${esc(p.category||'Товар')}${p.weight?` · ⚖️ ${esc(p.weight)}`:''}</div><div class="price">${money(p.price)}</div><div class="actions"><button class="details" data-details="${p.id}">ℹ️</button><button class="add" data-add="${p.id}">🛒 У кошик</button></div></div></article>`}
 function nav(){return `<nav class="bottom"><div class="bottom-inner"><button class="nav ${state.mode==='home'?'active':''}" data-nav="home"><i>🏠</i>Головна</button><button class="nav ${state.mode==='catalog'?'active':''}" data-nav="catalog"><i>📂</i>Каталог</button><button class="nav" data-nav="search"><i>🔍</i>Пошук</button><button class="nav ${state.mode==='favorites'?'active':''}" data-nav="favorites"><i>❤️</i>Обране</button><button class="nav" data-nav="cart"><i>🛒</i>Кошик <span class="badge">${countCart()}</span></button></div></nav>`}
 function shell(main){return `<main class="app"><header class="top"><div class="hero"><div class="brand"><div class="brand-main"><div class="logo">🍬</div><div><h1>OKVEJ</h1><p>Солодощі з доставкою по Україні</p></div></div><div class="count">${state.products.length} товарів</div></div><div class="search-row"><div class="search"><input id="search" value="${esc(state.query)}" placeholder="Пошук товару..."><span>🔍</span></div><button class="cat-button" id="filters">📂</button></div></div></header><div class="content">${main}</div>${nav()}</main>`}
 function home(){const c=cats();const all=Object.keys(c).sort((a,b)=>c[b]-c[a]);const gifts=state.products.filter(isGift).sort((a,b)=>b.price-a.price).slice(0,3);return `<section class="section"><div class="quick-grid"><button class="quick primary-tile" data-home="catalog"><span class="ico">🛍️</span><b>Відкрити каталог</b><small>${state.products.length} товарів</small></button><button class="quick" data-home="favorites"><span class="ico">❤️</span><b>Обране</b><small>${state.favorites.size} товарів</small></button><button class="quick" data-home="recent"><span class="ico">🕓</span><b>Переглянуті</b><small>${state.recent.length} товарів</small></button><button class="quick" data-home="cart"><span class="ico">🛒</span><b>Кошик</b><small>${countCart()} товарів</small></button></div></section><section class="section"><div class="section-head"><h2>Популярні категорії</h2><button class="view-all" data-home="catalog">Дивитись усі ›</button></div><div class="quick-grid">${all.slice(0,8).map(x=>`<button class="quick" data-cat="${esc(x)}"><span class="ico">${iconFor(x)}</span><b>${esc(x)}</b><small>${c[x]} товарів</small></button>`).join('')}</div></section><section class="section"><button class="site-card" id="site"><span><b>🌐 Перейти на наш сайт</b><small>Більше товарів та акцій на okvej.com.ua</small></span><span class="arrow">›</span></button><div class="delivery">🚚 Безкоштовна доставка по Києву від 10 000 грн</div></section>${gifts.length?`<section class="section"><div class="section-head"><h2>🎁 Подарункові набори</h2><button class="view-all" data-gifts="1">Дивитись усі ›</button></div><div class="product-grid">${gifts.map(card).join('')}</div></section>`:''}`}
@@ -3648,7 +3701,7 @@ function bind(){document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=
 function add(id){const p=state.products.find(x=>x.id===id);if(!p)return;state.cart[id]??={product:p,qty:0};state.cart[id].qty++;tg?.HapticFeedback?.impactOccurred('light');toast('Додано у кошик');render()}
 function toggleFav(id){state.favorites.has(id)?state.favorites.delete(id):state.favorites.add(id);tg?.HapticFeedback?.selectionChanged();render()}
 function remember(id){state.recent=[id,...state.recent.filter(x=>x!==id)].slice(0,20)}
-function details(id){const p=state.products.find(x=>x.id===id);if(!p)return;remember(id);const m=document.createElement('div');m.className='modal';m.innerHTML=`<div class="sheet"><div class="grab"></div><button class="close">×</button><img class="sheet-image" src="${esc(p.image||'')}" alt="${esc(p.title)}"><div class="tags"><span class="tag">${esc(p.category||'Товар')}</span><span class="tag hot">✅ В наявності</span></div><h2>${esc(p.title)}</h2><div class="sheet-price">${money(p.price)}</div><p class="description">${esc(p.description||'Опис товару уточнюється.')}</p><div class="sheet-actions"><button class="secondary">${state.favorites.has(id)?'❤️':'🤍'}</button><button class="primary">🛒 Додати у кошик</button></div></div>`;document.body.appendChild(m);m.onclick=e=>{if(e.target===m)m.remove()};m.querySelector('.close').onclick=()=>m.remove();m.querySelector('.primary').onclick=()=>{add(id);m.remove()};m.querySelector('.secondary').onclick=()=>{toggleFav(id);m.remove();details(id)}}
+function details(id){const p=state.products.find(x=>x.id===id);if(!p)return;remember(id);const m=document.createElement('div');m.className='modal';m.innerHTML=`<div class="sheet"><div class="grab"></div><button class="close">×</button><img class="sheet-image" src="${esc(p.image||'')}" alt="${esc(p.title)}"><div class="tags"><span class="tag">${esc(p.category||'Товар')}</span><span class="tag hot">✅ В наявності</span></div><h2>${esc(p.title)}</h2><div class="sheet-price">${money(p.price)}</div>${p.weight?`<p class="meta">⚖️ Фасування: <b>${esc(p.weight)}</b></p>`:''}<p class="description">${esc(p.description||'Опис товару уточнюється.')}</p><div class="sheet-actions"><button class="secondary">${state.favorites.has(id)?'❤️':'🤍'}</button><button class="primary">🛒 Додати у кошик</button></div></div>`;document.body.appendChild(m);m.onclick=e=>{if(e.target===m)m.remove()};m.querySelector('.close').onclick=()=>m.remove();m.querySelector('.primary').onclick=()=>{add(id);m.remove()};m.querySelector('.secondary').onclick=()=>{toggleFav(id);m.remove();details(id)}}
 function openCategories(){const c=cats(),arr=['Усі',...Object.keys(c).sort((a,b)=>c[b]-c[a])],m=document.createElement('div');m.className='modal';m.innerHTML=`<div class="sheet"><div class="grab"></div><button class="close">×</button><h2>📂 Категорії</h2><div class="cat-list">${arr.map(x=>`<button class="cat-item ${state.category===x?'active':''}" data-x="${esc(x)}"><span>${iconFor(x)} ${esc(x)}</span><b>${x==='Усі'?state.products.length:c[x]}</b></button>`).join('')}</div></div>`;document.body.appendChild(m);m.onclick=e=>{if(e.target===m)m.remove()};m.querySelector('.close').onclick=()=>m.remove();m.querySelectorAll('[data-x]').forEach(b=>b.onclick=()=>{state.category=b.dataset.x;state.mode='catalog';m.remove();render()})}
 function openRecent(){const items=state.recent.map(id=>state.products.find(p=>p.id===id)).filter(Boolean),m=document.createElement('div');m.className='modal';m.innerHTML=`<div class="sheet"><div class="grab"></div><button class="close">×</button><h2>🕓 Переглянуті</h2><div class="product-grid">${items.map(card).join('')||'<div class="empty">Поки порожньо</div>'}</div></div>`;document.body.appendChild(m);m.onclick=e=>{if(e.target===m)m.remove()};m.querySelector('.close').onclick=()=>m.remove();m.querySelectorAll('[data-card]').forEach(el=>el.onclick=e=>{if(e.target.closest('button'))return;m.remove();details(el.dataset.card)});m.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>{add(b.dataset.add);m.remove()})}
 function openCart(){const items=Object.values(state.cart),m=document.createElement('div');m.className='modal';m.innerHTML=`<div class="sheet"><div class="grab"></div><button class="close">×</button><h2>🛒 Кошик</h2>${items.length?items.map(x=>`<div class="cart-item"><img src="${esc(x.product.image||'')}" alt=""><div><b>${esc(x.product.title)}</b><div class="meta">${money(x.product.price)}</div></div><div class="qty"><button data-minus="${x.product.id}">−</button><b>${x.qty}</b><button data-plus="${x.product.id}">+</button></div></div>`).join('')+`<div class="summary"><span>Разом</span><span>${money(total())}</span></div><div class="checkout"><input id="name" placeholder="Ім’я"><input id="phone" type="tel" placeholder="Телефон"><input id="city" placeholder="Місто"><input id="branch" placeholder="Відділення Нової пошти"><textarea id="comment" placeholder="Коментар"></textarea><button id="order" class="primary">Оформити замовлення</button></div>`:'<div class="empty">Кошик порожній</div>'}</div>`;document.body.appendChild(m);m.onclick=e=>{if(e.target===m)m.remove()};m.querySelector('.close').onclick=()=>m.remove();m.querySelectorAll('[data-plus]').forEach(b=>b.onclick=()=>{state.cart[b.dataset.plus].qty++;m.remove();openCart();render()});m.querySelectorAll('[data-minus]').forEach(b=>b.onclick=()=>{const x=state.cart[b.dataset.minus];x.qty--;if(x.qty<=0)delete state.cart[b.dataset.minus];m.remove();openCart();render()});m.querySelector('#order')?.addEventListener('click',()=>submitOrder(m))}
@@ -3666,6 +3719,7 @@ def mini_product(product):
         "article": product_article(product),
         "title": clean_product_title(localize(product.get("title"))),
         "price": price_number(product),
+        "weight": product_weight(product),
         "image": get_image_url(product) or "",
         "category": category_name(product),
         "description": description[:700],
